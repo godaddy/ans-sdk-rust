@@ -53,8 +53,8 @@ moka = { workspace = true }
 # TLS integration (optional)
 rustls = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
-webpki-roots = { version = "0.26", optional = true }
-futures-util = "0.3.31"
+webpki-roots = { version = "1.0", optional = true }
+futures-util = "0.3.32"
 
 [features]
 default = []
@@ -75,9 +75,9 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 rcgen = { workspace = true }
-rmcp = { version = "0.8", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "0.17", features = ["client", "transport-streamable-http-client-reqwest"] }
 anyhow = "1.0"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 [[example]]
 name = "verify_server"
