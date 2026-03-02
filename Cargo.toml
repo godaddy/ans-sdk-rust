@@ -1,0 +1,109 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ans-types",
+    "crates/ans-verify",
+    "crates/ans-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+homepage = "https://github.com/godaddy/ans-sdk-rust"
+repository = "https://github.com/godaddy/ans-sdk-rust"
+
+[workspace.dependencies]
+# Internal crates
+ans-types = { path = "crates/ans-types" }
+ans-verify = { path = "crates/ans-verify" }
+ans-client = { path = "crates/ans-client" }
+
+# Async runtime
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
+rustls-pki-types = { version = "1.11", features = ["std"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# DNS resolution
+hickory-resolver = { version = "0.25", features = ["tls-ring", "dnssec-ring", "system-config"] }
+
+# Cryptography
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2.6"
+rcgen = { version = "0.13", features = ["pem"] }
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+x509-parser = "0.18"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Secret management
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Utilities
+chrono = { version = "0.4", default-features = false, features = ["serde", "std", "now"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.7", features = ["serde", "v4"] }
+tracing = "0.1"
+async-trait = "0.1"
+urlencoding = "2.1"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# Testing
+tokio-test = "0.4"
+wiremock = "0.5"
+rstest = "0.21"
+test-log = { version = "0.2", features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+# ── Pedantic (opinionated but high-value) ──
+pedantic = { level = "warn", priority = -1 }
+
+# Pedantic overrides — these are too noisy for this codebase
+module_name_repetitions = "allow"  # e.g. `ans_types::AnsName` is fine
+must_use_candidate        = "allow"  # too many false positives on builders
+return_self_not_must_use  = "allow"  # builder pattern is pervasive
+missing_errors_doc      = "allow"  # we document errors, just not on every fn
+missing_panics_doc      = "allow"  # same
+
+# ── Selected nursery lints (stable enough to use) ──
+redundant_pub_crate  = "warn"
+use_self             = "warn"
+
+# ── Panic prevention (critical for SDK — panics take down consumer apps) ──
+unwrap_used          = "deny"
+expect_used          = "deny"
+panic                = "deny"
+exit                 = "deny"
+mem_forget           = "deny"
+
+# ── Restriction lints (opt-in, high-value) ──
+dbg_macro            = "deny"
+print_stdout         = "deny"
+print_stderr         = "deny"
+todo                 = "deny"
+
+[workspace.lints.rust]
+unsafe_code          = "forbid"
+future_incompatible  = { level = "deny", priority = -1 }
+missing_debug_implementations = "warn"
+

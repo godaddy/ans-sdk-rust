@@ -1,0 +1,102 @@
+[package]
+name = "ans-verify"
+description = "ANS Trust Verification library for the Agent Name Service"
+keywords = ["ans", "verification", "agent-name-service", "mtls", "dane"]
+categories = ["authentication", "cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal crates
+ans-types = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# DNS resolution
+hickory-resolver = { workspace = true }
+
+# Cryptography
+sha2 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+x509-parser = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+# Caching
+moka = { workspace = true }
+
+# TLS integration (optional)
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+webpki-roots = { version = "0.26", optional = true }
+futures-util = "0.3.31"
+
+[features]
+default = []
+rustls = ["dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+test-support = []
+
+[[test]]
+name = "verification_scenarios"
+required-features = ["test-support"]
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+wiremock = { workspace = true }
+rstest = { workspace = true }
+test-log = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
+rmcp = { version = "0.8", features = ["client", "transport-streamable-http-client-reqwest"] }
+anyhow = "1.0"
+webpki-roots = "0.26"
+
+[[example]]
+name = "verify_server"
+path = "examples/verify_server.rs"
+
+[[example]]
+name = "verify_mtls_client"
+path = "examples/verify_mtls_client.rs"
+
+[[example]]
+name = "mcp_mtls_client"
+path = "examples/mcp_mtls_client.rs"
+required-features = ["rustls"]
+
+[[example]]
+name = "gen_test_certs"
+path = "examples/gen_test_certs.rs"
+
+[[example]]
+name = "local_mtls"
+path = "examples/local_mtls.rs"
+required-features = ["rustls", "test-support"]

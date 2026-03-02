@@ -1,0 +1,50 @@
+[package]
+name = "ans-client"
+description = "ANS API client for agent registration and management"
+keywords = ["ans", "client", "agent-name-service", "api"]
+categories = ["api-bindings"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal crates
+ans-types = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Secret management
+secrecy = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+wiremock = { workspace = true }
+rstest = { workspace = true }
+test-log = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
