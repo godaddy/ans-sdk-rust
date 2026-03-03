@@ -52,39 +52,28 @@ cargo test --workspace --features ans-verify/test-support,ans-verify/rustls     
 
 ## Releasing
 
-Releases use `cargo-release` locally + GitHub Actions CI for publishing.
+Releases are fully automated via [release-please](https://github.com/googleapis/release-please).
+No local tooling required — everything happens in CI.
 
-```bash
-# Install cargo-release (one-time)
-cargo install cargo-release
+**How it works:**
+1. Merge PRs to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, etc.)
+2. Release-please automatically creates/updates a **Release PR** with version bumps and CHANGELOG
+3. When the team merges the Release PR, release-please creates a git tag + GitHub Release
+4. The release workflow then runs full CI and publishes to crates.io
 
-# Dry run (default) — shows what would happen, changes nothing
-cargo release patch         # 0.1.0 -> 0.1.1
-cargo release minor         # 0.1.0 -> 0.2.0
-cargo release major         # 0.1.0 -> 1.0.0
+**Commit message conventions:**
+- `feat: add new verification mode` → bumps minor version, appears under "Features"
+- `fix: handle empty DNS response` → bumps patch version, appears under "Bug Fixes"
+- `feat!: redesign verifier API` or `BREAKING CHANGE:` footer → bumps major version
+- `chore:`, `ci:`, `docs:`, `test:` → no version bump, no changelog entry
 
-# Execute the release for real
-cargo release patch --execute
-```
-
-**What `cargo release` does locally:**
-1. Bumps `workspace.package.version` in root `Cargo.toml`
-2. Stamps `CHANGELOG.md` — replaces `[Unreleased]` with version + date, adds new `[Unreleased]` header
-3. Commits: `chore: Release v{version}`
-4. Tags: `v{version}`
-5. Pushes commit + tag to `origin/main`
-
-**What CI does on tag push (`.github/workflows/release.yml`):**
-1. Validates tag matches `Cargo.toml` version
-2. Runs full CI (fmt, clippy, test, MSRV, audit)
-3. Dry-run publish check
-4. Publishes to crates.io in dependency order: `ans-types` → `ans-verify` + `ans-client`
-5. Creates GitHub Release with changelog notes
+**What CI does on release (`.github/workflows/release.yml`):**
+1. Runs full CI gate (fmt, clippy, test, MSRV, audit, cargo-deny)
+2. Dry-run publish check
+3. Publishes to crates.io in dependency order: `ans-types` → `ans-verify` + `ans-client`
 
 **Prerequisites:**
-- Must be on `main` branch
 - `CARGO_REGISTRY_TOKEN` secret configured in the `crates-io` GitHub environment
-- Working tree must be clean
 
 ## Architecture
 
