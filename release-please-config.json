@@ -7,12 +7,7 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "changelog-path": "CHANGELOG.md",
-      "extra-files": [
-        "Cargo.toml",
-        "crates/ans-types/Cargo.toml",
-        "crates/ans-verify/Cargo.toml",
-        "crates/ans-client/Cargo.toml"
-      ]
+      "extra-files": []
     }
   }
 }
