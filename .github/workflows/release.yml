@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_only:
+        description: "Skip release-please, run publish directly (for retrying failed publishes)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Release Please: manages the Release PR and creates tags ──────────
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    if: inputs.publish_only != true
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # ── Publish to crates.io in dependency order ─────────────────────────
+  # CI already passed on the Release PR via build-sdk.yml before merge.
+  # Only publish-specific checks (dry-run packaging) run here.
+  publish-check:
+    name: Publish Dry Run
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: |
+      needs.release-please.outputs.release_created == 'true' ||
+      inputs.publish_only == true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: stable
+      - run: cargo publish -p ans-types --dry-run
+      - run: cargo publish -p ans-verify --dry-run
+      - run: cargo publish -p ans-client --dry-run
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [release-please, publish-check]
+    if: |
+      needs.release-please.outputs.release_created == 'true' ||
+      inputs.publish_only == true
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: stable
+
+      - name: Publish ans-types
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ans-types
+
+      - name: Wait for ans-types to be available on crates.io
+        run: |
+          for i in $(seq 1 30); do
+            if cargo search ans-types 2>/dev/null | grep -q '^ans-types '; then
+              echo "ans-types is available on crates.io"
+              break
+            fi
+            echo "Waiting for crates.io index (attempt $i/30)..."
+            sleep 10
+          done
+
+      - name: Publish ans-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ans-verify
+
+      - name: Publish ans-client
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p ans-client

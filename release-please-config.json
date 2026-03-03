@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "component": "ans-sdk-rust",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "Cargo.toml",
+        "crates/ans-types/Cargo.toml",
+        "crates/ans-verify/Cargo.toml",
+        "crates/ans-client/Cargo.toml"
+      ]
+    }
+  }
+}

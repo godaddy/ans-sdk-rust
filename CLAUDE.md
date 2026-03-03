@@ -50,6 +50,31 @@ cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls   
 cargo test --workspace --features ans-verify/test-support,ans-verify/rustls              # All tests pass
 ```
 
+## Releasing
+
+Releases are fully automated via [release-please](https://github.com/googleapis/release-please).
+No local tooling required — everything happens in CI.
+
+**How it works:**
+1. Merge PRs to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, etc.)
+2. Release-please automatically creates/updates a **Release PR** with version bumps and CHANGELOG
+3. When the team merges the Release PR, release-please creates a git tag + GitHub Release
+4. The release workflow then runs full CI and publishes to crates.io
+
+**Commit message conventions:**
+- `feat: add new verification mode` → bumps minor version, appears under "Features"
+- `fix: handle empty DNS response` → bumps patch version, appears under "Bug Fixes"
+- `feat!: redesign verifier API` or `BREAKING CHANGE:` footer → bumps major version
+- `chore:`, `ci:`, `docs:`, `test:` → no version bump, no changelog entry
+
+**What CI does on release (`.github/workflows/release.yml`):**
+1. Runs full CI gate (fmt, clippy, test, MSRV, audit, cargo-deny)
+2. Dry-run publish check
+3. Publishes to crates.io in dependency order: `ans-types` → `ans-verify` + `ans-client`
+
+**Prerequisites:**
+- `CARGO_REGISTRY_TOKEN` secret configured in the `crates-io` GitHub environment
+
 ## Architecture
 
 ### Workspace Structure
