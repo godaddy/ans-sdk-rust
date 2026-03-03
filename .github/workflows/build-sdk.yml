@@ -136,7 +136,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
 
   coverage:
-    name: Coverage (80% threshold)
+    name: Coverage (89% threshold)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -161,7 +161,7 @@ jobs:
           cargo llvm-cov \
             --workspace \
             --features ans-verify/test-support,ans-verify/rustls \
-            --fail-under-lines 80 \
+            --fail-under-lines 89 \
             | tee coverage-report.txt
       - name: Post coverage to PR
         if: github.event_name == 'pull_request' && always()
@@ -177,7 +177,7 @@ jobs:
             cat coverage-report.txt
             echo '```'
             echo ""
-            echo "> Threshold: 80% line coverage | [Full LCOV report]($RUN_URL)"
+            echo "> Threshold: 89% line coverage | [Full LCOV report]($RUN_URL)"
           } > pr-comment.md
           # Delete previous coverage comment to keep PR clean
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
