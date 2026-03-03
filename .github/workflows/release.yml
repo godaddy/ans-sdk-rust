@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_only:
+        description: "Skip release-please, run publish directly (for retrying failed publishes)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -10,13 +16,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
 
 jobs:
   # ── Release Please: manages the Release PR and creates tags ──────────
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
+    if: inputs.publish_only != true
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -27,108 +33,16 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # ── CI gate (only runs when a release is created) ────────────────────
-  fmt:
-    name: Format
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: stable
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: stable
-          components: clippy
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls
-
-  test:
-    name: Test
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: stable
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --features ans-verify/test-support,ans-verify/rustls
-
-  msrv:
-    name: MSRV (1.88)
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: "1.88"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-msrv-
-      - run: cargo check --workspace --features ans-verify/rustls
-
-  audit:
-    name: Security Audit
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: stable
-      - run: cargo install cargo-audit
-      - run: cargo audit
-
-  deny:
-    name: Dependency Compliance
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
-
+  # ── Publish to crates.io in dependency order ─────────────────────────
+  # CI already passed on the Release PR via build-sdk.yml before merge.
+  # Only publish-specific checks (dry-run packaging) run here.
   publish-check:
     name: Publish Dry Run
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    needs: release-please
+    if: |
+      needs.release-please.outputs.release_created == 'true' ||
+      inputs.publish_only == true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
@@ -138,12 +52,13 @@ jobs:
       - run: cargo publish -p ans-verify --dry-run
       - run: cargo publish -p ans-client --dry-run
 
-  # ── Publish to crates.io in dependency order ─────────────────────────
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [release-please, fmt, clippy, test, msrv, audit, deny, publish-check]
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please, publish-check]
+    if: |
+      needs.release-please.outputs.release_created == 'true' ||
+      inputs.publish_only == true
     environment: crates-io
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -156,8 +71,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p ans-types
 
-      - name: Wait for crates.io index
-        run: sleep 30
+      - name: Wait for ans-types to be available on crates.io
+        run: |
+          for i in $(seq 1 30); do
+            if cargo search ans-types 2>/dev/null | grep -q '^ans-types '; then
+              echo "ans-types is available on crates.io"
+              break
+            fi
+            echo "Waiting for crates.io index (attempt $i/30)..."
+            sleep 10
+          done
 
       - name: Publish ans-verify
         env:
