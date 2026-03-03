@@ -1,0 +1,17 @@
+# Changelog replacements live here because file paths in pre-release-replacements
+# are relative to the crate directory. ans-types is published first (it's the
+# dependency root), so it owns the workspace-level CHANGELOG.md updates.
+#
+# Replacement order matters — these run sequentially:
+#   1. Stamp "Unreleased" → version number (global, catches header + URL)
+#   2. Stamp "ReleaseDate" → actual date (global)
+#   3. Pin the old compare URL from "...HEAD" → "...vX.Y.Z"
+#   4. Insert new [Unreleased] header after the sentinel
+#   5. Insert new [Unreleased] compare URL after the sentinel
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "Unreleased", replace = "{{version}}" },
+  { file = "../../CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },
+  { file = "../../CHANGELOG.md", search = "\\.\\.\\.HEAD", replace = "...v{{version}}", min = 0 },
+  { file = "../../CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n\n## [Unreleased] - ReleaseDate", exactly = 1 },
+  { file = "../../CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: https://github.com/godaddy/ans-sdk-rust/compare/v{{version}}...HEAD", exactly = 1 },
+]

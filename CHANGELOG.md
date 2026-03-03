@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - Unreleased
+<!-- next-header -->
+
+## [Unreleased] - ReleaseDate
 
 ### Added
 
@@ -37,3 +39,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Panic-prevention lints (`unwrap_used`, `expect_used`, `panic`) denied in production code
 - Constant-time certificate fingerprint comparison via `subtle::ConstantTimeEq`
 - HTTPS enforced on `AnsClientBuilder` base URL by default
+
+<!-- next-url -->

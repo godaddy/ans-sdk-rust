@@ -50,6 +50,42 @@ cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls   
 cargo test --workspace --features ans-verify/test-support,ans-verify/rustls              # All tests pass
 ```
 
+## Releasing
+
+Releases use `cargo-release` locally + GitHub Actions CI for publishing.
+
+```bash
+# Install cargo-release (one-time)
+cargo install cargo-release
+
+# Dry run (default) — shows what would happen, changes nothing
+cargo release patch         # 0.1.0 -> 0.1.1
+cargo release minor         # 0.1.0 -> 0.2.0
+cargo release major         # 0.1.0 -> 1.0.0
+
+# Execute the release for real
+cargo release patch --execute
+```
+
+**What `cargo release` does locally:**
+1. Bumps `workspace.package.version` in root `Cargo.toml`
+2. Stamps `CHANGELOG.md` — replaces `[Unreleased]` with version + date, adds new `[Unreleased]` header
+3. Commits: `chore: Release v{version}`
+4. Tags: `v{version}`
+5. Pushes commit + tag to `origin/main`
+
+**What CI does on tag push (`.github/workflows/release.yml`):**
+1. Validates tag matches `Cargo.toml` version
+2. Runs full CI (fmt, clippy, test, MSRV, audit)
+3. Dry-run publish check
+4. Publishes to crates.io in dependency order: `ans-types` → `ans-verify` + `ans-client`
+5. Creates GitHub Release with changelog notes
+
+**Prerequisites:**
+- Must be on `main` branch
+- `CARGO_REGISTRY_TOKEN` secret configured in the `crates-io` GitHub environment
+- Working tree must be clean
+
 ## Architecture
 
 ### Workspace Structure

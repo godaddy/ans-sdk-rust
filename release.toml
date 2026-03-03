@@ -1,0 +1,41 @@
+# cargo-release configuration
+# Usage:
+#   cargo release patch   # 0.1.0 -> 0.1.1
+#   cargo release minor   # 0.1.0 -> 0.2.0
+#   cargo release major   # 0.1.0 -> 1.0.0
+#   cargo release 0.2.0   # explicit version
+#
+# Dry run (default): cargo release patch
+# Execute for real:  cargo release patch --execute
+
+# ── Workspace Settings ─────────────────────────────────────────────────
+# All crates share a single version from [workspace.package]
+shared-version = true
+# Single commit for all version bumps across the workspace
+consolidate-commits = true
+
+# ── Branch Policy ──────────────────────────────────────────────────────
+allow-branch = ["main"]
+
+# ── Publishing ─────────────────────────────────────────────────────────
+# CI handles crates.io publishing via the release workflow
+publish = false
+# Skip cargo build verification (CI does this)
+verify = false
+
+# ── Git Settings ───────────────────────────────────────────────────────
+push = true
+push-remote = "origin"
+tag = true
+tag-prefix = ""
+tag-name = "v{{version}}"
+tag-message = "chore: Release v{{version}}"
+pre-release-commit-message = "chore: Release v{{version}}"
+sign-tag = false
+sign-commit = false
+
+# ── Changelog Management ──────────────────────────────────────────────
+# Replacements are configured in crates/ans-types/release.toml (the first
+# crate published) with relative paths to the workspace-root CHANGELOG.md.
+# Setting empty here prevents each crate from looking for a per-crate CHANGELOG.
+pre-release-replacements = []
