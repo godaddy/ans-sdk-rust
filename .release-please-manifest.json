@@ -1,5 +1,5 @@
 {
-  "crates/ans-types": "0.1.0",
-  "crates/ans-verify": "0.1.0",
-  "crates/ans-client": "0.1.0"
+  "crates/ans-types": "0.1.1",
+  "crates/ans-verify": "0.1.1",
+  "crates/ans-client": "0.1.1"
 }
