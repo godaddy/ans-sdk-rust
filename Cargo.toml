@@ -16,9 +16,9 @@ repository = "https://github.com/godaddy/ans-sdk-rust"
 
 [workspace.dependencies]
 # Internal crates
-ans-types = { path = "crates/ans-types" }
-ans-verify = { path = "crates/ans-verify" }
-ans-client = { path = "crates/ans-client" }
+ans-types = { path = "crates/ans-types", version = "0.1.1" }
+ans-verify = { path = "crates/ans-verify", version = "0.1.1" }
+ans-client = { path = "crates/ans-client", version = "0.1.1" }
 
 # Async runtime
 tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
