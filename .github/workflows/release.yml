@@ -22,7 +22,6 @@ jobs:
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
-    if: inputs.publish_only != true
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
     steps:
