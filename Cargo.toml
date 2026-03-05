@@ -21,7 +21,7 @@ ans-verify = { path = "crates/ans-verify", version = "0.1.1" }
 ans-client = { path = "crates/ans-client", version = "0.1.1" }
 
 # Async runtime
-tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -29,9 +29,10 @@ tokio-rustls = "0.26"
 rustls-pki-types = { version = "1.11", features = ["std"] }
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "rustls-tls",
+    "query",
+    "rustls",
 ] }
 
 # DNS resolution
@@ -41,9 +42,9 @@ hickory-resolver = { version = "0.25", features = ["tls-ring", "dnssec-ring", "s
 sha2 = "0.10"
 hex = "0.4"
 subtle = "2.6"
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"] }
 rsa = { version = "0.9", features = ["pem"] }
-rand = "0.8"
+rand = "0.9"
 x509-parser = "0.18"
 
 # Serialization
@@ -59,7 +60,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # Utilities
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "now"] }
 url = { version = "2.5", features = ["serde"] }
-uuid = { version = "1.7", features = ["serde", "v4"] }
+uuid = { version = "1.21", features = ["serde", "v4"] }
 tracing = "0.1"
 async-trait = "0.1"
 urlencoding = "2.1"
@@ -69,8 +70,8 @@ moka = { version = "0.12", features = ["future"] }
 
 # Testing
 tokio-test = "0.4"
-wiremock = "0.5"
-rstest = "0.21"
+wiremock = "0.6"
+rstest = "0.26"
 test-log = { version = "0.2", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
