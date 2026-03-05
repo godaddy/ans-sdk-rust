@@ -250,7 +250,8 @@ fn generate_test_pki(host: &str, version: &str) -> Result<TestPki, rcgen::Error>
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::KeyEncipherment,
     ];
-    let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let server_cert = server_params.signed_by(&server_key, &issuer)?;
 
     // Client cert
     let client_key = KeyPair::generate()?;
@@ -266,7 +267,7 @@ fn generate_test_pki(host: &str, version: &str) -> Result<TestPki, rcgen::Error>
     ));
     client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    let client_cert = client_params.signed_by(&client_key, &ca_cert, &ca_key)?;
+    let client_cert = client_params.signed_by(&client_key, &issuer)?;
 
     Ok(TestPki {
         ca_pem: ca_cert.pem(),

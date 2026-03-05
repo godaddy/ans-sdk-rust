@@ -34,7 +34,7 @@ use ans_verify::{AnsServerCertVerifier, AnsVerifier, CertFingerprint, DanePolicy
 use anyhow::{Context, Result};
 use rmcp::{
     ServiceExt,
-    model::{ClientCapabilities, ClientInfo, Implementation},
+    model::ClientInfo,
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -101,17 +101,9 @@ async fn main() -> Result<()> {
         StreamableHttpClientTransportConfig::with_uri(server_url),
     );
 
-    let client_info = ClientInfo {
-        protocol_version: Default::default(),
-        capabilities: ClientCapabilities::default(),
-        client_info: Implementation {
-            name: "ans-mcp-example".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            title: None,
-            website_url: None,
-            icons: None,
-        },
-    };
+    let mut client_info = ClientInfo::default();
+    client_info.client_info.name = "ans-mcp-example".to_string();
+    client_info.client_info.version = env!("CARGO_PKG_VERSION").to_string();
 
     let client = client_info.serve(transport).await?;
     println!("Connected — server certificate verified against ANS badge");

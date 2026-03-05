@@ -161,7 +161,7 @@ jobs:
           cargo llvm-cov \
             --workspace \
             --features ans-verify/test-support,ans-verify/rustls \
-            --fail-under-lines 89 \
+            --fail-under-lines 90 \
             | tee coverage-report.txt
       - name: Post coverage to PR
         if: github.event_name == 'pull_request' && always()

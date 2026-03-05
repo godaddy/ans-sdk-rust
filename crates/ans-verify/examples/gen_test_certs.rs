@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate CA
     println!("Generating CA certificate...");
-    let (ca_cert, ca_key) = generate_ca("ANS Test CA")?;
+    let (ca_cert, ca_params, ca_key) = generate_ca("ANS Test CA")?;
     let ca_cert_pem = ca_cert.pem();
     let ca_key_pem = ca_key.serialize_pem();
 
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate Server Certificate
     println!("Generating server certificate...");
     let (server_cert_pem, server_key_pem, server_fingerprint) =
-        generate_server_cert(&host, &version, &ca_cert, &ca_key)?;
+        generate_server_cert(&host, &version, &ca_params, &ca_key)?;
 
     fs::write(output_dir.join("server.pem"), &server_cert_pem)?;
     fs::write(output_dir.join("server.key"), &server_key_pem)?;
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate Client Certificate
     println!("Generating client certificate...");
     let (client_cert_pem, client_key_pem, client_fingerprint) =
-        generate_client_cert(&host, &version, &ca_cert, &ca_key)?;
+        generate_client_cert(&host, &version, &ca_params, &ca_key)?;
 
     fs::write(output_dir.join("client.pem"), &client_cert_pem)?;
     fs::write(output_dir.join("client.key"), &client_key_pem)?;
@@ -117,7 +117,7 @@ CLIENT_FINGERPRINT={}
     Ok(())
 }
 
-fn generate_ca(cn: &str) -> Result<(rcgen::Certificate, KeyPair), rcgen::Error> {
+fn generate_ca(cn: &str) -> Result<(rcgen::Certificate, CertificateParams, KeyPair), rcgen::Error> {
     let key_pair = KeyPair::generate()?;
 
     let mut params = CertificateParams::default();
@@ -129,13 +129,13 @@ fn generate_ca(cn: &str) -> Result<(rcgen::Certificate, KeyPair), rcgen::Error> 
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
     let cert = params.self_signed(&key_pair)?;
-    Ok((cert, key_pair))
+    Ok((cert, params, key_pair))
 }
 
 fn generate_server_cert(
     host: &str,
     version: &str,
-    ca_cert: &rcgen::Certificate,
+    ca_params: &CertificateParams,
     ca_key: &KeyPair,
 ) -> Result<(String, String, String), rcgen::Error> {
     let key_pair = KeyPair::generate()?;
@@ -164,7 +164,8 @@ fn generate_server_cert(
         KeyUsagePurpose::KeyEncipherment,
     ];
 
-    let cert = params.signed_by(&key_pair, ca_cert, ca_key)?;
+    let issuer = rcgen::Issuer::from_params(ca_params, ca_key);
+    let cert = params.signed_by(&key_pair, &issuer)?;
     let fingerprint = compute_fingerprint(cert.der());
 
     Ok((cert.pem(), key_pair.serialize_pem(), fingerprint))
@@ -173,7 +174,7 @@ fn generate_server_cert(
 fn generate_client_cert(
     host: &str,
     version: &str,
-    ca_cert: &rcgen::Certificate,
+    ca_params: &CertificateParams,
     ca_key: &KeyPair,
 ) -> Result<(String, String, String), rcgen::Error> {
     let key_pair = KeyPair::generate()?;
@@ -199,7 +200,8 @@ fn generate_client_cert(
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
 
-    let cert = params.signed_by(&key_pair, ca_cert, ca_key)?;
+    let issuer = rcgen::Issuer::from_params(ca_params, ca_key);
+    let cert = params.signed_by(&key_pair, &issuer)?;
     let fingerprint = compute_fingerprint(cert.der());
 
     Ok((cert.pem(), key_pair.serialize_pem(), fingerprint))

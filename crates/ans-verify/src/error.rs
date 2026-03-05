@@ -258,3 +258,79 @@ pub enum DaneError {
     #[error("DNS error during TLSA lookup: {0}")]
     DnsError(#[from] DnsError),
 }
+
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dns_error_display() {
+        let error = DnsError::NotFound {
+            fqdn: "example.com".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "DNS record not found (NXDOMAIN) for example.com"
+        );
+    }
+
+    #[test]
+    fn test_tlog_error_display() {
+        let error = TlogError::NotFound {
+            url: "https://example.com/badge".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Badge not found at https://example.com/badge"
+        );
+    }
+
+    #[test]
+    fn test_verification_error_display() {
+        let error = VerificationError::InvalidStatus {
+            status: BadgeStatus::Revoked.clone(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Badge status Revoked is not valid for connections"
+        );
+    }
+
+    #[test]
+    fn test_dane_error_display() {
+        let error = DaneError::NoTlsaRecords {
+            fqdn: "example.com".to_string(),
+            port: 443,
+        };
+        assert_eq!(
+            error.to_string(),
+            "No TLSA records found for example.com:443"
+        );
+    }
+
+    #[test]
+    fn test_multiple_verification_error_display() {
+        let error = VerificationError::Multiple {
+            errors: vec![
+                VerificationError::FingerprintMismatch {
+                    expected: "expected".to_string(),
+                    actual: "actual".to_string(),
+                },
+                VerificationError::InvalidStatus {
+                    status: BadgeStatus::Revoked.clone(),
+                },
+            ],
+        };
+        assert_eq!(
+            error.to_string(),
+            "Multiple verification errors: [FingerprintMismatch { expected: \"expected\", actual: \"actual\" }, InvalidStatus { status: Revoked }]"
+        );
+    }
+
+    #[test]
+    fn test_configuration_error_display() {
+        let error = VerificationError::Configuration("missing key".to_string());
+        assert_eq!(error.to_string(), "Configuration error: missing key");
+    }
+}
