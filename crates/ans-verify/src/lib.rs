@@ -78,7 +78,7 @@ pub use ans_types::{
 };
 
 // Re-export from this crate
-pub use cache::{BadgeCache, CacheConfig};
+pub use cache::{BadgeCache, CacheConfig, CacheKey, CachedBadge};
 pub use dane::{
     DanePolicy, DaneVerificationResult, TlsaMatchingType, TlsaRecord, TlsaSelector, TlsaUsage,
 };

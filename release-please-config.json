@@ -2,55 +2,24 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
-  "include-component-in-tag": false,
+  "include-component-in-tag": true,
   "packages": {
     "crates/ans-types": {
       "release-type": "rust",
-      "component": "ans-types",
-      "extra-files": [
-        {
-          "type": "toml",
-          "path": "../../Cargo.toml",
-          "jsonpath": "$.workspace.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "../../Cargo.toml",
-          "jsonpath": "$.workspace.dependencies.ans-types.version"
-        }
-      ]
+      "component": "ans-types"
     },
     "crates/ans-verify": {
       "release-type": "rust",
-      "component": "ans-verify",
-      "extra-files": [
-        {
-          "type": "toml",
-          "path": "../../Cargo.toml",
-          "jsonpath": "$.workspace.dependencies.ans-verify.version"
-        }
-      ]
+      "component": "ans-verify"
     },
     "crates/ans-client": {
       "release-type": "rust",
-      "component": "ans-client",
-      "extra-files": [
-        {
-          "type": "toml",
-          "path": "../../Cargo.toml",
-          "jsonpath": "$.workspace.dependencies.ans-client.version"
-        }
-      ]
+      "component": "ans-client"
     }
   },
   "plugins": [
     {
       "type": "cargo-workspace"
-    },
-    {
-      "type": "linked-versions",
-      "groupName": "ans-sdk",
-      "components": ["ans-types", "ans-verify", "ans-client"]
     }
   ]
 }
