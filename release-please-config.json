@@ -3,6 +3,19 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "include-component-in-tag": true,
+  "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance Improvements" },
+        { "type": "revert", "section": "Reverts" },
+        { "type": "docs", "section": "Documentation" },
+        { "type": "chore", "section": "Miscellaneous" },
+        { "type": "refactor", "section": "Code Refactoring" },
+        { "type": "style", "section": "Styles" },
+        { "type": "test", "section": "Tests" },
+        { "type": "build", "section": "Build System" },
+        { "type": "ci", "section": "Continuous Integration", "hidden": true }
+  ],
   "packages": {
     "crates/ans-types": {
       "release-type": "rust",
