@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/godaddy/ans-sdk-rust/compare/ans-verify-v0.1.2...ans-verify-v0.1.3) (2026-03-11)
+
+
+### Build System
+
+* **deps:** Bump the rust-dependencies group with 3 updates ([#18](https://github.com/godaddy/ans-sdk-rust/issues/18)) ([2517be2](https://github.com/godaddy/ans-sdk-rust/commit/2517be25d6da834ff47d10c52d8310354528efdb))
+
 ## [0.1.2](https://github.com/godaddy/ans-sdk-rust/compare/ans-verify-v0.1.1...ans-verify-v0.1.2) (2026-03-05)
 
 
