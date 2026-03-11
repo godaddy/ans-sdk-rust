@@ -44,7 +44,7 @@ hex = "0.4"
 subtle = "2.6"
 rcgen = { version = "0.14", features = ["pem"] }
 rsa = { version = "0.9", features = ["pem"] }
-rand = "0.9"
+rand = "0.10"
 x509-parser = "0.18"
 
 # Serialization
@@ -60,7 +60,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 # Utilities
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "now"] }
 url = { version = "2.5", features = ["serde"] }
-uuid = { version = "1.21", features = ["serde", "v4"] }
+uuid = { version = "1.22", features = ["serde", "v4"] }
 tracing = "0.1"
 async-trait = "0.1"
 urlencoding = "2.1"
