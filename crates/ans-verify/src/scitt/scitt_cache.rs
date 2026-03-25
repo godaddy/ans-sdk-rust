@@ -33,8 +33,9 @@ const DEFAULT_MAX_ENTRIES: u64 = 1000;
 ///
 /// Receipts are immutable proofs of append-only log inclusion. They use a
 /// fixed TTL (default 24h) since the receipt content never changes — only
-/// the tree grows. The cache is consumed by the [`ScittHeaderSupplier`]
-/// (agent-side) to avoid re-fetching on every outgoing request.
+/// the tree grows. This cache is used on the verifier side to avoid
+/// re-verifying receipts that have already been validated from remote
+/// agents' HTTP headers.
 pub struct ReceiptCache {
     cache: Cache<Uuid, Arc<VerifiedReceipt>>,
     ttl: Duration,

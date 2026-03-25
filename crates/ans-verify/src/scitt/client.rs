@@ -66,7 +66,7 @@ impl HttpScittClient {
     ///
     /// # Errors
     ///
-    /// Returns [`ScittError::InvalidKeyFormat`] if the URL cannot be parsed.
+    /// Returns [`ScittError::InvalidUrl`] if the URL cannot be parsed.
     pub fn new(base_url: impl AsRef<str>) -> Result<Self, ScittError> {
         let raw = base_url.as_ref();
         // Ensure the URL has a trailing slash so `.join("v1/...")` works correctly.
@@ -76,7 +76,7 @@ impl HttpScittClient {
             format!("{raw}/")
         };
         let parsed = Url::parse(&normalised)
-            .map_err(|e| ScittError::InvalidKeyFormat(format!("invalid base URL '{raw}': {e}")))?;
+            .map_err(|e| ScittError::InvalidUrl(format!("invalid base URL '{raw}': {e}")))?;
         Ok(Self {
             client: Client::new(),
             base_url: parsed,
@@ -113,10 +113,10 @@ impl HttpScittClient {
         for (name, value) in &self.extra_headers {
             let header_name =
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-                    ScittError::InvalidKeyFormat(format!("invalid header name '{name}': {e}"))
+                    ScittError::InvalidUrl(format!("invalid header name '{name}': {e}"))
                 })?;
             let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
-                ScittError::InvalidKeyFormat(format!("invalid header value for '{name}': {e}"))
+                ScittError::InvalidUrl(format!("invalid header value for '{name}': {e}"))
             })?;
             map.insert(header_name, header_value);
         }
@@ -184,7 +184,7 @@ impl ScittClient for HttpScittClient {
         let url = self
             .base_url
             .join(&format!("v1/agents/{agent_id}/receipt"))
-            .map_err(|e| ScittError::InvalidKeyFormat(format!("URL join error: {e}")))?;
+            .map_err(|e| ScittError::InvalidUrl(format!("URL join error: {e}")))?;
 
         let bytes = self.get_bytes(&url, Some(agent_id)).await?;
         tracing::debug!(%agent_id, bytes = bytes.len(), "Fetched SCITT receipt");
@@ -195,7 +195,7 @@ impl ScittClient for HttpScittClient {
         let url = self
             .base_url
             .join(&format!("v1/agents/{agent_id}/status-token"))
-            .map_err(|e| ScittError::InvalidKeyFormat(format!("URL join error: {e}")))?;
+            .map_err(|e| ScittError::InvalidUrl(format!("URL join error: {e}")))?;
 
         let bytes = self.get_bytes(&url, Some(agent_id)).await?;
         tracing::debug!(%agent_id, bytes = bytes.len(), "Fetched SCITT status token");
@@ -206,7 +206,7 @@ impl ScittClient for HttpScittClient {
         let url = self
             .base_url
             .join("root-keys")
-            .map_err(|e| ScittError::InvalidKeyFormat(format!("URL join error: {e}")))?;
+            .map_err(|e| ScittError::InvalidUrl(format!("URL join error: {e}")))?;
 
         tracing::debug!(url = %url, "Fetching SCITT root keys");
 
@@ -414,10 +414,7 @@ mod tests {
     fn http_client_new_invalid_url() {
         let result = HttpScittClient::new("not a url ://");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ScittError::InvalidKeyFormat(_)
-        ));
+        assert!(matches!(result.unwrap_err(), ScittError::InvalidUrl(_)));
     }
 
     #[test]

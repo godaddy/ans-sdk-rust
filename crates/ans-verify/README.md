@@ -117,7 +117,7 @@ Enable with `features = ["scitt"]` for offline-capable verification using signed
 
 ### SCITT Flow
 
-1. Parse SCITT headers (`X-ANS-Receipt`, `X-ANS-Status-Token`) from the HTTP response
+1. Parse SCITT headers (`X-SCITT-Receipt`, `X-ANS-Status-Token`) from the HTTP response
 2. Verify the status token: COSE_Sign1 signature, expiry, agent status
 3. Match certificate fingerprint against the token's cert array
 4. Verify the receipt: COSE_Sign1 signature, Merkle inclusion proof
@@ -160,7 +160,7 @@ use ans_verify::{ScittHeaderSupplier, HttpScittClient};
 
 let supplier = ScittHeaderSupplier::new(agent_id, scitt_client, key_store);
 let headers = supplier.current_headers().await;
-// headers.receipt_base64 → X-ANS-Receipt
+// headers.receipt_base64 → X-SCITT-Receipt
 // headers.status_token_base64 → X-ANS-Status-Token
 ```
 

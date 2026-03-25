@@ -32,10 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // 1. Configure SCITT root keys
-    let key_store = Arc::new(ScittKeyStore::from_c2sp_keys(&[]).unwrap_or_else(|e| {
-        panic!("Failed to create key store: {e}");
-    }));
+    // 1. Configure SCITT root keys (production transparency log)
+    let root_keys = vec![
+        "transparency.ans.godaddy.com+c9e2f584+AjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJiE0eriKUOYbYrXerJlCJv6TZGEglLkPOHo+bEieNtPsL2FjuXfRCZbYF3RCwqF/99iDVxIUHJWTcW3KXqbiCU=".to_string(),
+    ];
+    let key_store =
+        Arc::new(ScittKeyStore::from_c2sp_keys(&root_keys).expect("root keys should parse"));
 
     // 2. Build verifier with SCITT (RequireScitt policy for strict environments)
     let verifier = AnsVerifier::builder()

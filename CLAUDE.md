@@ -150,7 +150,7 @@ Client verification (`verify_client`) for mTLS:
 
 SCITT-enhanced verification (`verify_server_with_scitt` / `verify_client_with_scitt`):
 
-1. Parse SCITT headers (`X-ANS-Receipt`, `X-ANS-Status-Token`)
+1. Parse SCITT headers (`X-SCITT-Receipt`, `X-ANS-Status-Token`)
 2. If status token present: verify COSE_Sign1 signature, check expiry, validate status
 3. Match certificate fingerprint against token's cert array
 4. If receipt present: verify Merkle inclusion proof

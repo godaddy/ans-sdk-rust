@@ -127,6 +127,11 @@ pub enum ScittError {
         trusted: Vec<String>,
     },
 
+    // ── Client configuration ──
+    /// Base URL for the SCITT client is invalid.
+    #[error("Invalid SCITT client URL: {0}")]
+    InvalidUrl(String),
+
     // ── Transport ──
     /// HTTP request to the SCITT API failed.
     #[error("SCITT HTTP error: {0}")]
@@ -299,6 +304,12 @@ mod tests {
     fn display_base64_decode() {
         let err = ScittError::Base64Decode("invalid padding".to_string());
         assert_eq!(err.to_string(), "Base64 decode error: invalid padding");
+    }
+
+    #[test]
+    fn display_invalid_url() {
+        let err = ScittError::InvalidUrl("bad URL".to_string());
+        assert_eq!(err.to_string(), "Invalid SCITT client URL: bad URL");
     }
 
     #[test]

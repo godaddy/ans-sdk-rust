@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Extract SCITT headers from the HTTP response
     let headers = ScittHeaders::from_base64(
-        Some(receipt_b64),       // X-ANS-Receipt header
+        Some(receipt_b64),       // X-SCITT-Receipt header
         Some(status_token_b64),  // X-ANS-Status-Token header
     )?;
 

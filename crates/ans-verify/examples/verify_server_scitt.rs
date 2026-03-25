@@ -32,17 +32,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // 1. Configure SCITT root keys (in production, fetched from the transparency log)
+    // 1. Configure SCITT root keys (production transparency log)
     let root_keys = vec![
         // C2SP key format: {issuer}+{key_id_hex}+{spki_base64}
-        "tlog.example.com+deadbeef+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...".to_string(),
+        "transparency.ans.godaddy.com+c9e2f584+AjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABJiE0eriKUOYbYrXerJlCJv6TZGEglLkPOHo+bEieNtPsL2FjuXfRCZbYF3RCwqF/99iDVxIUHJWTcW3KXqbiCU=".to_string(),
     ];
-    let key_store = Arc::new(
-        ScittKeyStore::from_c2sp_keys(&root_keys).unwrap_or_else(|e| {
-            println!("Note: Using empty key store (example keys invalid): {e}");
-            ScittKeyStore::from_c2sp_keys(&[]).unwrap()
-        }),
-    );
+    let key_store =
+        Arc::new(ScittKeyStore::from_c2sp_keys(&root_keys).expect("root keys should parse"));
 
     // 2. Build verifier with SCITT enabled
     let verifier = AnsVerifier::builder()
@@ -65,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 4. Simulate SCITT headers from the HTTP response
-    //    In production, extract from `X-ANS-Receipt` and `X-ANS-Status-Token` headers.
+    //    In production, extract from `X-SCITT-Receipt` and `X-ANS-Status-Token` headers.
     let headers = ScittHeaders::new(None, None); // No headers → badge fallback
 
     println!("Verifying server with SCITT: {server_fqdn}");
