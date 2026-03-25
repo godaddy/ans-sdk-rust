@@ -68,6 +68,22 @@ let fp = CertFingerprint::parse("SHA256:abcd...")?;
 assert!(fp.matches("sha256:ABCD...")); // case-insensitive
 ```
 
+### SCITT Types
+
+These types support SCITT verification in `ans-verify` but live here because they have no crypto dependencies:
+
+- **`StatusTokenPayload`** — Decoded status token payload with agent ID, status, ANS name, certificate fingerprints, and expiry timestamps
+- **`CertEntry`** — Certificate fingerprint + type (e.g., `X509-DV-SERVER`) from status token cert arrays
+- **`VerificationTier`** — `BadgeOnly`, `StatusTokenVerified`, or `FullScitt`
+
+```rust
+use ans_types::{VerificationTier, StatusTokenPayload, CertEntry};
+
+assert!(VerificationTier::FullScitt.is_scitt());
+assert!(VerificationTier::FullScitt.has_receipt());
+assert!(!VerificationTier::BadgeOnly.is_scitt());
+```
+
 ## Error Types
 
 - `ParseError` — Invalid FQDN, version, ANS name, or URL format
