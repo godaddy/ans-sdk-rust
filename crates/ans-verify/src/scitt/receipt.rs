@@ -120,11 +120,16 @@ pub fn verify_receipt(
     let vdp = extract_vdp(&parsed.unprotected)?;
 
     // Step 6: compute root hash by walking the inclusion_path.
-    // The inclusion_path is in the unprotected (unsigned) header, so it cannot be
-    // independently verified against a trusted root here. The ECDSA signature already
-    // guarantees the payload authenticity. The root_hash stored in VerifiedReceipt is
-    // the result of this computation — callers can use it for cross-checking against
-    // an independently trusted tree head if needed.
+    //
+    // The inclusion_path lives in the unprotected (unsigned) header. The COSE
+    // signature (step 4) already proves the TL attested to this event — that is
+    // the trust anchor for per-request verification. The Merkle proof cannot add
+    // trust here: even if the root were signed into the receipt, it would only
+    // prove "the TL says the root is X," which is circular.
+    //
+    // The proof's real value is for external log monitors who compare tree heads
+    // across time to verify append-only consistency. We compute and return the
+    // root_hash so monitors/auditors can use it for that purpose.
     let root_hash = compute_merkle_root(
         &parsed.payload,
         vdp.leaf_index,
