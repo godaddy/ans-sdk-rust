@@ -164,9 +164,10 @@ impl HttpScittClient {
         }
 
         if !status.is_success() {
-            return Err(ScittError::InvalidKeyFormat(format!(
-                "unexpected HTTP status {status} from {url}"
-            )));
+            return Err(ScittError::UnexpectedHttpStatus {
+                status: status.as_u16(),
+                url: url.to_string(),
+            });
         }
 
         let bytes = response
@@ -233,9 +234,10 @@ impl ScittClient for HttpScittClient {
         }
 
         if !status.is_success() {
-            return Err(ScittError::InvalidKeyFormat(format!(
-                "unexpected HTTP status {status} from {url}"
-            )));
+            return Err(ScittError::UnexpectedHttpStatus {
+                status: status.as_u16(),
+                url: url.to_string(),
+            });
         }
 
         let body = response.text().await.map_err(|e| {

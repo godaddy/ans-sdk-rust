@@ -168,6 +168,14 @@ fn compute_merkle_root(
             "leaf_index {leaf_index} >= tree_size {tree_size}"
         )));
     }
+    // Same DoS guard as verify_merkle_inclusion — cap proof depth at 63
+    // (sufficient for a tree with 2^63 entries).
+    if inclusion_path.len() > 63 {
+        return Err(ScittError::InvalidMerkleProof(format!(
+            "inclusion_path length {} exceeds maximum of 63",
+            inclusion_path.len()
+        )));
+    }
 
     let mut current = compute_leaf_hash(event_bytes);
     let mut index = leaf_index;

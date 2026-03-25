@@ -145,8 +145,7 @@ pub fn verify_merkle_inclusion(
 /// Build a complete Merkle tree from a slice of leaf byte strings and return
 /// the root hash together with the inclusion proof for `leaf_index`.
 ///
-/// This is intentionally in non-test code so it can be compiled under the
-/// `test-support` feature, but the function is only used in tests.
+/// This helper is only used in in-crate tests.
 #[cfg(test)]
 pub(crate) fn build_tree_and_proof(
     leaves: &[&[u8]],

@@ -170,8 +170,12 @@ impl ScittHeaderSupplier {
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
-            // Initial fetch if needed
-            if supplier.artifacts.read().await.receipt_bytes.is_none() {
+            // Initial fetch if needed: run if either receipt or token is missing
+            let needs_fetch = {
+                let artifacts = supplier.artifacts.read().await;
+                artifacts.receipt_bytes.is_none() || artifacts.token_exp.is_none()
+            };
+            if needs_fetch {
                 Self::do_refresh_inner(&supplier).await;
             }
 

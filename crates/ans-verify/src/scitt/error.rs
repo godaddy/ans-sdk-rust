@@ -128,9 +128,18 @@ pub enum ScittError {
     },
 
     // ── Client configuration ──
-    /// Base URL for the SCITT client is invalid.
-    #[error("Invalid SCITT client URL: {0}")]
+    /// Base URL or header configuration for the SCITT client is invalid.
+    #[error("Invalid SCITT client config: {0}")]
     InvalidUrl(String),
+
+    /// TL returned an unexpected HTTP status code.
+    #[error("Unexpected HTTP {status} from {url}")]
+    UnexpectedHttpStatus {
+        /// The HTTP status code.
+        status: u16,
+        /// The URL that was requested.
+        url: String,
+    },
 
     // ── Transport ──
     /// HTTP request to the SCITT API failed.
@@ -182,12 +191,18 @@ impl ScittError {
     /// - `TokenExpired`: stale, not tampered
     /// - `NotSupported`: TL doesn't support SCITT
     /// - `NotFound`: agent not yet registered for SCITT
+    /// - `UnexpectedHttpStatus`: TL returned an error (transient, not integrity)
+    /// - `HttpError`: transport failure (network, timeout)
     ///
     /// All integrity failures (structural, crypto, Merkle) are hard rejects.
     pub fn should_fallback_to_badge(&self) -> bool {
         matches!(
             self,
-            Self::TokenExpired { .. } | Self::NotSupported { .. } | Self::NotFound { .. }
+            Self::TokenExpired { .. }
+                | Self::NotSupported { .. }
+                | Self::NotFound { .. }
+                | Self::UnexpectedHttpStatus { .. }
+                | Self::HttpError(_)
         )
     }
 }
@@ -309,7 +324,19 @@ mod tests {
     #[test]
     fn display_invalid_url() {
         let err = ScittError::InvalidUrl("bad URL".to_string());
-        assert_eq!(err.to_string(), "Invalid SCITT client URL: bad URL");
+        assert_eq!(err.to_string(), "Invalid SCITT client config: bad URL");
+    }
+
+    #[test]
+    fn display_unexpected_http_status() {
+        let err = ScittError::UnexpectedHttpStatus {
+            status: 503,
+            url: "https://tl.example.com/root-keys".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Unexpected HTTP 503 from https://tl.example.com/root-keys"
+        );
     }
 
     #[test]
@@ -364,6 +391,13 @@ mod tests {
         assert!(
             ScittError::NotFound {
                 agent_id: Uuid::nil()
+            }
+            .should_fallback_to_badge()
+        );
+        assert!(
+            ScittError::UnexpectedHttpStatus {
+                status: 503,
+                url: "https://tl.example.com/root-keys".to_string()
             }
             .should_fallback_to_badge()
         );
