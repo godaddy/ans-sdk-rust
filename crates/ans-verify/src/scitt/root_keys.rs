@@ -37,7 +37,7 @@ pub struct TrustedKey {
 /// Store of trusted root keys, indexed by 4-byte key ID for O(1) lookup.
 ///
 /// Both TL keys (for receipts) and RA keys (for status tokens) come from the
-/// same `/v1/root-keys` endpoint. They are distinguished by the `kid` in the
+/// same `/root-keys` endpoint. They are distinguished by the `kid` in the
 /// COSE protected header at verification time.
 #[derive(Debug, Clone)]
 pub struct ScittKeyStore {

@@ -49,7 +49,7 @@ pub trait ScittClient: Send + Sync {
 /// Fetches SCITT artifacts from the TL API using the following endpoints:
 /// - `GET /v1/agents/{agent_id}/receipt` → raw `COSE_Sign1` receipt bytes
 /// - `GET /v1/agents/{agent_id}/status-token` → raw `COSE_Sign1` status token bytes
-/// - `GET /v1/root-keys` → JSON array of C2SP key strings
+/// - `GET /root-keys` → newline-separated C2SP key strings
 #[derive(Debug)]
 pub struct HttpScittClient {
     client: Client,
@@ -205,7 +205,7 @@ impl ScittClient for HttpScittClient {
     async fn fetch_root_keys(&self) -> Result<Vec<String>, ScittError> {
         let url = self
             .base_url
-            .join("v1/root-keys")
+            .join("root-keys")
             .map_err(|e| ScittError::InvalidKeyFormat(format!("URL join error: {e}")))?;
 
         tracing::debug!(url = %url, "Fetching SCITT root keys");
@@ -238,9 +238,20 @@ impl ScittClient for HttpScittClient {
             )));
         }
 
-        let keys: Vec<String> = response.json().await.map_err(|e| {
-            ScittError::InvalidKeyFormat(format!("failed to parse root-keys JSON: {e}"))
+        let body = response.text().await.map_err(|e| {
+            ScittError::InvalidKeyFormat(format!("failed to read root-keys response: {e}"))
         })?;
+        let keys: Vec<String> = body
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        if keys.is_empty() {
+            return Err(ScittError::InvalidKeyFormat(
+                "root-keys endpoint returned no keys".to_string(),
+            ));
+        }
 
         tracing::debug!(count = keys.len(), "Fetched SCITT root keys");
         Ok(keys)

@@ -18,7 +18,7 @@
 //!   --tlog https://transparency.ans.godaddy.com \
 //!   --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694
 //!
-//! # With explicit root keys (when /v1/root-keys is not available):
+//! # With explicit root keys (when /root-keys is not available):
 //! cargo run -p ans-verify --features scitt --example inspect_scitt -- \
 //!   --tlog https://transparency.ans.godaddy.com \
 //!   --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694 \
@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              Example:\n  cargo run -p ans-verify --features scitt --example inspect_scitt -- \\\n    \
              --tlog https://transparency.ans.godaddy.com \\\n    \
              --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694\n\n\
-             Root keys are fetched from /v1/root-keys. Pass --key to provide them\n\
+             Root keys are fetched from /root-keys. Pass --key to provide them\n\
              explicitly (useful when the endpoint is not available)."
         );
         std::process::exit(1);
