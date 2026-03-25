@@ -117,7 +117,19 @@ impl Expiry<Uuid, Arc<VerifiedStatusToken>> for StatusTokenExpiry {
     }
 
     // On read: keep the current expiration (don't reset on access).
-    // On update: recalculate from the new token's exp.
+
+    fn expire_after_update(
+        &self,
+        _key: &Uuid,
+        value: &Arc<VerifiedStatusToken>,
+        _updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        // Recalculate TTL from the new token's exp claim.
+        let now = chrono::Utc::now().timestamp();
+        let remaining = (value.payload.exp - now).max(0).cast_unsigned();
+        Some(Duration::from_secs(remaining))
+    }
 }
 
 /// Cache for verified SCITT status tokens, keyed by agent ID.

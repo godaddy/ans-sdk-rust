@@ -12,10 +12,9 @@ use uuid::Uuid;
 
 /// Errors from SCITT receipt and status token verification.
 ///
-/// Each variant maps to a specific failure mode. The [`ScittError::is_terminal_status`]
-/// helper identifies errors that should map to `VerificationOutcome::InvalidStatus`
-/// (not `VerificationOutcome::ScittError`) for consistent handling regardless of
-/// whether badge or SCITT detected the terminal status.
+/// Each variant maps to a specific failure mode. Use
+/// [`VerificationOutcome::is_terminal_status()`](crate::VerificationOutcome::is_terminal_status)
+/// for a unified terminal-status check across both badge and SCITT paths.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ScittError {
@@ -176,10 +175,14 @@ pub enum ScittError {
 impl ScittError {
     /// Returns `true` if this error represents a terminal agent status.
     ///
-    /// Terminal status errors should map to `VerificationOutcome::InvalidStatus`
-    /// rather than `VerificationOutcome::ScittError`. This ensures callers who
-    /// handle `InvalidStatus` today get consistent behavior regardless of whether
-    /// badge or SCITT detected the terminal status.
+    /// Terminal status errors are always hard rejects — they are never eligible
+    /// for badge fallback, and `BadgeWithScittEnhancement` will not discard them.
+    ///
+    /// Callers should use [`VerificationOutcome::is_terminal_status()`] for a
+    /// unified check that covers both badge-detected (`InvalidStatus`) and
+    /// SCITT-detected terminal statuses.
+    ///
+    /// [`VerificationOutcome::is_terminal_status()`]: crate::VerificationOutcome::is_terminal_status
     pub fn is_terminal_status(&self) -> bool {
         matches!(self, Self::TerminalStatus(_) | Self::AgentTerminal { .. })
     }

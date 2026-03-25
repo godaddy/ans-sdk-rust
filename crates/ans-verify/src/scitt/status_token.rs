@@ -186,6 +186,13 @@ fn decode_status_token_payload(payload_bytes: &[u8]) -> Result<StatusTokenPayloa
             Some(8) => {
                 // metadata_hashes: map of text→text
                 if let ciborium::Value::Map(m) = v {
+                    const MAX_METADATA_ENTRIES: usize = 256;
+                    if m.len() > MAX_METADATA_ENTRIES {
+                        return Err(ScittError::CborDecodeError(format!(
+                            "metadata_hashes has {} entries, maximum is {MAX_METADATA_ENTRIES}",
+                            m.len()
+                        )));
+                    }
                     for (mk, mv) in m {
                         if let (ciborium::Value::Text(k), ciborium::Value::Text(val)) = (mk, mv) {
                             metadata_hashes.insert(k, val);
@@ -229,6 +236,15 @@ fn parse_badge_status(s: &str) -> Result<BadgeStatus, ScittError> {
 /// production tokens and string-keyed maps (`{"fingerprint": ..., "cert_type": ...}`)
 /// for test compatibility.
 fn parse_cert_entries(arr: Vec<ciborium::Value>) -> Result<Vec<CertEntry>, ScittError> {
+    // An agent has at most a handful of certs. Cap to prevent allocation amplification
+    // from a crafted CBOR array with many elements under MAX_COSE_INPUT_SIZE.
+    const MAX_CERT_ENTRIES: usize = 128;
+    if arr.len() > MAX_CERT_ENTRIES {
+        return Err(ScittError::CborDecodeError(format!(
+            "cert array has {} entries, maximum is {MAX_CERT_ENTRIES}",
+            arr.len()
+        )));
+    }
     let mut entries = Vec::with_capacity(arr.len());
     for item in arr {
         let ciborium::Value::Map(m) = item else {

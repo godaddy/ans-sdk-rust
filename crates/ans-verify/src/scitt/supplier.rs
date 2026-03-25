@@ -207,10 +207,10 @@ impl ScittHeaderSupplier {
     ///
     /// If the status token has expired, returns `None` for the token field.
     pub async fn current_headers(&self) -> ScittOutgoingHeaders {
-        // Lazy init: fetch if we have nothing cached
+        // Lazy init: fetch if either artifact is missing
         {
             let artifacts = self.inner.artifacts.read().await;
-            if artifacts.receipt_bytes.is_none() && artifacts.status_token_bytes.is_none() {
+            if artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none() {
                 drop(artifacts); // release read lock before taking write path
                 Self::do_refresh_inner(&self.inner).await;
             }

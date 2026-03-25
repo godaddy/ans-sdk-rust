@@ -4,8 +4,13 @@
 //! HTTP framework (reqwest, axum, actix, etc.) and pass raw strings here.
 //! This module handles Base64 decoding only.
 
+use super::cose::MAX_COSE_INPUT_SIZE;
 use super::error::ScittError;
 use base64::prelude::{BASE64_STANDARD, Engine};
+
+/// Maximum base64-encoded header size: `MAX_COSE_INPUT_SIZE` * 4/3 rounded up.
+/// Rejects obviously oversized input before allocating for the decode.
+const MAX_BASE64_HEADER_SIZE: usize = MAX_COSE_INPUT_SIZE.div_ceil(3) * 4;
 
 /// SCITT artifacts extracted from HTTP headers.
 ///
@@ -47,6 +52,11 @@ impl ScittHeaders {
     ) -> Result<Self, ScittError> {
         let receipt = receipt_base64
             .map(|s| {
+                if s.len() > MAX_BASE64_HEADER_SIZE {
+                    return Err(ScittError::OversizedInput {
+                        max_bytes: MAX_COSE_INPUT_SIZE,
+                    });
+                }
                 BASE64_STANDARD
                     .decode(s)
                     .map_err(|e| ScittError::Base64Decode(format!("receipt: {e}")))
@@ -55,6 +65,11 @@ impl ScittHeaders {
 
         let status_token = status_token_base64
             .map(|s| {
+                if s.len() > MAX_BASE64_HEADER_SIZE {
+                    return Err(ScittError::OversizedInput {
+                        max_bytes: MAX_COSE_INPUT_SIZE,
+                    });
+                }
                 BASE64_STANDARD
                     .decode(s)
                     .map_err(|e| ScittError::Base64Decode(format!("status_token: {e}")))
@@ -231,5 +246,27 @@ mod tests {
         // 3 bytes → 4 chars, no padding
         let headers = ScittHeaders::from_base64(Some("YWJj"), None).unwrap();
         assert_eq!(headers.receipt.as_deref(), Some(b"abc".as_slice()));
+    }
+
+    #[test]
+    fn rejects_oversized_receipt() {
+        let big = "A".repeat(MAX_BASE64_HEADER_SIZE + 1);
+        let result = ScittHeaders::from_base64(Some(&big), None);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ScittError::OversizedInput { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_token() {
+        let big = "A".repeat(MAX_BASE64_HEADER_SIZE + 1);
+        let result = ScittHeaders::from_base64(None, Some(&big));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ScittError::OversizedInput { .. }
+        ));
     }
 }

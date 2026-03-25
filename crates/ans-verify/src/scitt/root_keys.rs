@@ -23,6 +23,10 @@ use tracing::warn;
 
 use super::error::ScittError;
 
+/// Maximum base64 length for SPKI-DER in C2SP keys.
+/// P-256 SPKI-DER is 91 bytes (~124 base64 chars). 1KB is extremely generous.
+const MAX_SPKI_BASE64_LEN: usize = 1024;
+
 /// A trusted ECDSA P-256 signing key parsed from C2SP format.
 #[derive(Debug, Clone)]
 pub struct TrustedKey {
@@ -151,7 +155,14 @@ pub fn parse_c2sp_key(key_string: &str) -> Result<TrustedKey, ScittError> {
         key_hash_bytes[3],
     ];
 
-    // Base64-decode the key material
+    // Base64-decode the key material.
+    // Cap before allocation to prevent amplification from a crafted response.
+    if spki_b64.len() > MAX_SPKI_BASE64_LEN {
+        return Err(ScittError::InvalidKeyFormat(format!(
+            "SPKI base64 is {} chars, maximum is {MAX_SPKI_BASE64_LEN}",
+            spki_b64.len()
+        )));
+    }
     let decoded = BASE64_STANDARD
         .decode(spki_b64)
         .map_err(|e| ScittError::InvalidKeyFormat(format!("SPKI-DER is not valid Base64: {e}")))?;

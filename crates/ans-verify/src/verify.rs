@@ -273,6 +273,21 @@ impl VerificationOutcome {
         }
     }
 
+    /// Check if the agent is in a terminal status (revoked, expired, etc.).
+    ///
+    /// Returns `true` for both badge-detected terminal status ([`InvalidStatus`])
+    /// and SCITT-detected terminal status ([`ScittError::TerminalStatus`] /
+    /// [`ScittError::AgentTerminal`]). Callers should use this instead of
+    /// pattern-matching individual variants.
+    pub fn is_terminal_status(&self) -> bool {
+        match self {
+            Self::InvalidStatus { status, .. } => status.should_reject(),
+            #[cfg(feature = "scitt")]
+            Self::ScittError(e) => e.is_terminal_status(),
+            _ => false,
+        }
+    }
+
     /// Check if the agent is not registered with ANS.
     pub fn is_not_ans_agent(&self) -> bool {
         matches!(self, Self::NotAnsAgent { .. })
@@ -1847,7 +1862,14 @@ impl AnsVerifier {
                     Self::try_scitt_verification(server_cert, headers, key_store, config, true);
                 match scitt_outcome {
                     Some(outcome) if outcome.is_success() => outcome,
-                    _ => badge_outcome, // Keep badge result on SCITT failure
+                    // Terminal status from SCITT overrides badge success —
+                    // a revoked/expired agent must not pass verification.
+                    Some(outcome @ VerificationOutcome::ScittError(_)) if matches!(&outcome, VerificationOutcome::ScittError(e) if e.is_terminal_status()) =>
+                    {
+                        tracing::warn!("SCITT detected terminal status — overriding badge result");
+                        outcome
+                    }
+                    _ => badge_outcome, // Keep badge result on non-terminal SCITT failure
                 }
             }
         }
@@ -1890,6 +1912,12 @@ impl AnsVerifier {
                     Self::try_scitt_verification(client_cert, headers, key_store, config, false);
                 match scitt_outcome {
                     Some(outcome) if outcome.is_success() => outcome,
+                    // Terminal status from SCITT overrides badge success
+                    Some(outcome @ VerificationOutcome::ScittError(_)) if matches!(&outcome, VerificationOutcome::ScittError(e) if e.is_terminal_status()) =>
+                    {
+                        tracing::warn!("SCITT detected terminal status — overriding badge result");
+                        outcome
+                    }
                     _ => badge_outcome,
                 }
             }

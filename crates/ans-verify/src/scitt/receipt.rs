@@ -27,6 +27,9 @@ use super::error::ScittError;
 use super::merkle::{compute_leaf_hash, compute_node_hash};
 use super::root_keys::ScittKeyStore;
 
+/// Maximum Merkle proof depth — sufficient for a tree with 2^63 entries.
+const MAX_MERKLE_DEPTH: usize = 63;
+
 /// A receipt whose COSE signature and Merkle proof have been verified.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -168,11 +171,9 @@ fn compute_merkle_root(
             "leaf_index {leaf_index} >= tree_size {tree_size}"
         )));
     }
-    // Same DoS guard as verify_merkle_inclusion — cap proof depth at 63
-    // (sufficient for a tree with 2^63 entries).
-    if inclusion_path.len() > 63 {
+    if inclusion_path.len() > MAX_MERKLE_DEPTH {
         return Err(ScittError::InvalidMerkleProof(format!(
-            "inclusion_path length {} exceeds maximum of 63",
+            "inclusion_path length {} exceeds maximum of {MAX_MERKLE_DEPTH}",
             inclusion_path.len()
         )));
     }
@@ -258,6 +259,15 @@ fn extract_vdp(unprotected: &ciborium::Value) -> Result<Vdp, ScittError> {
                         "inclusion_path (key -3) must be a CBOR array".to_string(),
                     ));
                 };
+                // Cap at 63 (max Merkle tree depth for 2^63 entries) before allocation.
+                // ciborium already parsed all elements, so arr.len() is real, but
+                // we reject early to match compute_merkle_root's depth guard.
+                if arr.len() > MAX_MERKLE_DEPTH {
+                    return Err(ScittError::InvalidMerkleProof(format!(
+                        "inclusion_path length {} exceeds maximum of {MAX_MERKLE_DEPTH}",
+                        arr.len()
+                    )));
+                }
                 let mut path = Vec::with_capacity(arr.len());
                 for (i, item) in arr.iter().enumerate() {
                     let ciborium::Value::Bytes(bytes) = item else {

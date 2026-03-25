@@ -240,9 +240,10 @@ impl ScittClient for HttpScittClient {
             });
         }
 
-        let body = response.text().await.map_err(|e| {
-            ScittError::InvalidKeyFormat(format!("failed to read root-keys response: {e}"))
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ScittError::HttpError(e.into()))?;
         let keys: Vec<String> = body
             .lines()
             .map(|l| l.trim().to_string())
