@@ -70,6 +70,9 @@ mod verify;
 #[cfg(feature = "rustls")]
 mod rustls_verifier;
 
+#[cfg(feature = "scitt")]
+mod scitt;
+
 // Re-export types from ans-types for convenience
 pub use ans_types::{
     AgentEvent, AgentInfo, AnsName, Attestations, Badge, BadgePayload, BadgeStatus,
@@ -96,5 +99,21 @@ pub use verify::{
     VerificationOutcome,
 };
 
+#[cfg(feature = "scitt")]
+pub use verify::{ScittConfig, ScittTierPolicy};
+
 #[cfg(feature = "rustls")]
 pub use rustls_verifier::{AnsClientCertVerifier, AnsServerCertVerifier};
+
+#[cfg(feature = "scitt")]
+pub use scitt::{
+    HttpScittClient, MAX_COSE_INPUT_SIZE, ParsedCoseSign1, ProtectedHeader, ReceiptCache,
+    ScittClient, ScittError, ScittHeaderSupplier, ScittHeaders, ScittKeyStore,
+    ScittOutgoingHeaders, ScittRefreshHandle, StatusTokenCache, TrustedKey, VerifiedReceipt,
+    VerifiedStatusToken, build_sig_structure, compute_leaf_hash, compute_sig_structure_digest,
+    matches_identity_cert, matches_server_cert, parse_c2sp_key, parse_cose_sign1,
+    verify_merkle_inclusion, verify_receipt, verify_status_token,
+};
+
+#[cfg(all(feature = "scitt", any(test, feature = "test-support")))]
+pub use scitt::MockScittClient;

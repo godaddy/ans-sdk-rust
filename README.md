@@ -24,6 +24,7 @@ Verification relies on:
 - **Transparency Log API** returning badges with status and certificate fingerprints
 - **Certificate fingerprint comparison** to ensure the presented certificate matches the registered identity
 - **DANE/TLSA records** (optional) for additional certificate binding via DNSSEC
+- **SCITT verification** (optional) for offline-capable trust via signed status tokens and Merkle inclusion receipts
 
 ## Installation
 
@@ -207,6 +208,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## SCITT Verification (Optional)
+
+SCITT (Supply Chain Integrity, Transparency, and Trust) provides offline-capable verification using cryptographically signed artifacts from the transparency log. Enable with `features = ["scitt"]`.
+
+### How It Works
+
+| Artifact | Format | Purpose |
+|----------|--------|---------|
+| **Status Token** | `COSE_Sign1` (CBOR) | Signed claim of current agent status, certificate fingerprints, and expiry |
+| **Receipt** | `COSE_Sign1` (CBOR) | Merkle inclusion proof that the agent event is in the transparency log |
+| **Root Keys** | C2SP format | ECDSA P-256 public keys for verifying token/receipt signatures |
+
+### SCITT-Enhanced Server Verification
+
+```rust
+use std::sync::Arc;
+use ans_verify::{
+    AnsVerifier, CertFingerprint, CertIdentity, ScittConfig, ScittHeaders,
+    ScittKeyStore, ScittTierPolicy, VerificationOutcome,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse root keys from the transparency log
+    let root_keys = vec!["tlog.example.com+deadbeef+base64...".to_string()];
+    let key_store = Arc::new(ScittKeyStore::from_c2sp_keys(&root_keys)?);
+
+    let verifier = AnsVerifier::builder()
+        .with_caching()
+        .scitt_config(ScittConfig::new()
+            .with_tier_policy(ScittTierPolicy::ScittWithBadgeFallback))
+        .scitt_key_store(key_store)
+        .build()
+        .await?;
+
+    // Extract SCITT headers from the HTTP response
+    let headers = ScittHeaders::from_base64(
+        Some(receipt_b64),       // X-ANS-Receipt header
+        Some(status_token_b64),  // X-ANS-Status-Token header
+    )?;
+
+    let server_cert = CertIdentity::new(
+        Some("agent.example.com".to_string()),
+        vec!["agent.example.com".to_string()],
+        vec![],
+        CertFingerprint::from_der(&cert_der_bytes),
+    );
+
+    match verifier.verify_server_with_scitt("agent.example.com", &server_cert, &headers).await {
+        VerificationOutcome::ScittVerified { tier, status_token, .. } => {
+            println!("SCITT verified (tier: {tier:?}, status: {:?})", status_token.payload.status);
+        }
+        VerificationOutcome::Verified { badge, .. } => {
+            println!("Badge fallback: {}", badge.agent_name());
+        }
+        outcome => println!("Failed: {outcome:?}"),
+    }
+
+    Ok(())
+}
+```
+
+### Tier Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `ScittWithBadgeFallback` | Try SCITT first, fall back to badge if no headers (default) |
+| `RequireScitt` | SCITT required, no badge fallback |
+| `BadgeWithScittEnhancement` | Badge first, upgrade to SCITT if headers present |
+
+### Verification Tiers
+
+| Tier | Meaning |
+|------|---------|
+| `FullScitt` | Status token + receipt both verified |
+| `StatusTokenVerified` | Status token verified, receipt missing or invalid |
+| `BadgeOnly` | Traditional badge-based verification |
+
+### Inspect SCITT Artifacts
+
+Use the `inspect_scitt` example to explore real artifacts from a transparency log:
+
+```bash
+cargo run -p ans-verify --features scitt --example inspect_scitt -- \
+  --tlog https://transparency.ans.godaddy.com \
+  --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694
+```
+
 ## Configuration
 
 ### Verifier Builder Options
@@ -301,12 +390,14 @@ let verifier = AnsVerifier::builder()
 
 | Outcome | Meaning |
 |---------|---------|
-| `Verified` | Certificate matches registered ANS agent |
+| `Verified` | Certificate matches registered ANS agent (badge-based) |
+| `ScittVerified` | Certificate verified via SCITT status token (+ optional receipt) |
 | `NotAnsAgent` | No `_ans-badge` or `_ra-badge` DNS record found |
 | `InvalidStatus` | Badge status is `EXPIRED` or `REVOKED` |
 | `FingerprintMismatch` | Certificate fingerprint doesn't match badge |
 | `HostnameMismatch` | Certificate CN doesn't match badge agent.host |
 | `AnsNameMismatch` | URI SAN doesn't match badge ansName (mTLS only) |
+| `ScittError` | SCITT verification failed (signature, expiry, Merkle proof, etc.) |
 | `DnsError` | DNS lookup failed |
 | `TlogError` | Transparency log API error |
 | `DaneError` | DANE/TLSA verification failed |
@@ -333,7 +424,13 @@ let verifier = AnsVerifier::builder()
 │  │  (client-side TLS)  │     │  (server-side mTLS) │            │
 │  │  + DANE/TLSA verify │     │                     │            │
 │  └──────────┬──────────┘     └──────────┬──────────┘            │
-└─────────────┼───────────────────────────┼───────────────────────┘
+│             │                           │                        │
+│  ┌──────────┴───────────────────────────┴──────────┐            │
+│  │           SCITT Verification (optional)          │            │
+│  │  ScittKeyStore ← verify_status_token()           │            │
+│  │                 ← verify_receipt()                │            │
+│  └──────────────────────────────────────────────────┘            │
+└─────────────┬───────────────────────────┬───────────────────────┘
               │                           │
               ▼                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -394,7 +491,11 @@ let verifier = ServerVerifier::builder()
 
 Run tests:
 ```bash
+# Core tests
 cargo test --workspace --features ans-verify/test-support
+
+# Including SCITT tests
+cargo test --workspace --features ans-verify/test-support,ans-verify/scitt
 ```
 
 ## Logging
@@ -496,6 +597,9 @@ See the `crates/ans-verify/examples/` directory:
 | `gen_test_certs.rs` | Generate CA, server, and client certificates | - |
 | `local_mtls.rs` | Self-contained mTLS demo (generates certs in-memory) | `rustls`, `test-support` |
 | `mcp_mtls_client.rs` | Connect to real MCP server with ANS verification | `rustls` |
+| `inspect_scitt.rs` | Fetch and verify SCITT artifacts from a live transparency log | `scitt` |
+| `verify_server_scitt.rs` | SCITT-enhanced server verification flow | `scitt` |
+| `verify_mtls_scitt.rs` | SCITT-enhanced mTLS client verification flow | `scitt` |
 
 ### Generate Test Certificates
 
@@ -520,6 +624,16 @@ ANS_CERT_PATH=/path/to/identity.crt \
 ANS_KEY_PATH=/path/to/identity.key \
 ANS_SERVER_URL=https://agent.example.com/mcp \
 cargo run -p ans-verify --example mcp_mtls_client --features rustls
+```
+
+### SCITT Inspector
+
+Fetch and verify real SCITT artifacts from a transparency log:
+
+```bash
+cargo run -p ans-verify --features scitt --example inspect_scitt -- \
+  --tlog https://transparency.ans.godaddy.com \
+  --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694
 ```
 
 ### Basic Verification Examples

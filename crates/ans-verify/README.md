@@ -111,6 +111,67 @@ let verifier = ServerVerifier::builder()
 
 When configured, badge URLs discovered via DNS TXT records are validated before any HTTP request is made. URLs pointing to hosts not in the set are rejected with `TlogError::UntrustedDomain`. By default (`None`), all domains are allowed.
 
+## SCITT Verification
+
+Enable with `features = ["scitt"]` for offline-capable verification using signed status tokens and Merkle inclusion receipts from the transparency log.
+
+### SCITT Flow
+
+1. Parse SCITT headers (`X-ANS-Receipt`, `X-ANS-Status-Token`) from the HTTP response
+2. Verify the status token: COSE_Sign1 signature, expiry, agent status
+3. Match certificate fingerprint against the token's cert array
+4. Verify the receipt: COSE_Sign1 signature, Merkle inclusion proof
+5. Result: `ScittVerified` with tier (`FullScitt` or `StatusTokenVerified`)
+
+If SCITT headers are absent or the token is expired, the verifier falls back to badge-based verification (configurable via `ScittTierPolicy`).
+
+```rust
+use std::sync::Arc;
+use ans_verify::{
+    AnsVerifier, ScittConfig, ScittHeaders, ScittKeyStore, ScittTierPolicy,
+};
+
+let key_store = Arc::new(ScittKeyStore::from_c2sp_keys(&root_keys)?);
+
+let verifier = AnsVerifier::builder()
+    .with_caching()
+    .scitt_config(ScittConfig::new()
+        .with_tier_policy(ScittTierPolicy::ScittWithBadgeFallback))
+    .scitt_key_store(key_store)
+    .build()
+    .await?;
+
+let headers = ScittHeaders::from_base64(
+    receipt_header.as_deref(),
+    status_token_header.as_deref(),
+)?;
+
+let outcome = verifier
+    .verify_server_with_scitt("agent.example.com", &server_cert, &headers)
+    .await;
+```
+
+### Agent-Side Header Supply
+
+Use `ScittHeaderSupplier` for agents to maintain fresh SCITT artifacts:
+
+```rust
+use ans_verify::{ScittHeaderSupplier, HttpScittClient};
+
+let supplier = ScittHeaderSupplier::new(agent_id, scitt_client, key_store);
+let headers = supplier.current_headers().await;
+// headers.receipt_base64 → X-ANS-Receipt
+// headers.status_token_base64 → X-ANS-Status-Token
+```
+
+### Inspect Live Artifacts
+
+```bash
+cargo run -p ans-verify --features scitt --example inspect_scitt -- \
+  --tlog https://transparency.ans.godaddy.com \
+  --agent-id b8a46f57-5599-4b4d-9a53-0313e5529694
+```
+
 ## Traits
 
 Implement these traits for custom backends:
@@ -135,6 +196,17 @@ pub trait TransparencyLogClient: Send + Sync {
     async fn fetch_badge_by_id(&self, agent_id: Uuid) -> Result<Badge, TlogError>;
     async fn fetch_audit(&self, agent_id: Uuid, limit: Option<u32>, offset: Option<u32>)
         -> Result<AuditResponse, TlogError>;
+}
+```
+
+### `ScittClient` (feature = "scitt")
+
+```rust
+#[async_trait]
+pub trait ScittClient: Send + Sync {
+    async fn fetch_receipt(&self, agent_id: Uuid) -> Result<Vec<u8>, ScittError>;
+    async fn fetch_status_token(&self, agent_id: Uuid) -> Result<Vec<u8>, ScittError>;
+    async fn fetch_root_keys(&self) -> Result<Vec<String>, ScittError>;
 }
 ```
 
@@ -168,7 +240,8 @@ let verifier = ServerVerifier::builder()
 | Feature | Description |
 |---|---|
 | `rustls` | Enables `AnsServerCertVerifier` and `AnsClientCertVerifier` for rustls TLS integration |
-| `test-support` | Exposes `MockDnsResolver` and `MockTransparencyLogClient` for use in downstream integration tests |
+| `scitt` | Enables SCITT verification: `ScittKeyStore`, `verify_status_token`, `verify_receipt`, `ScittHeaderSupplier`, `HttpScittClient` |
+| `test-support` | Exposes `MockDnsResolver`, `MockTransparencyLogClient`, and `MockScittClient` for use in downstream integration tests |
 
 ## License
 
