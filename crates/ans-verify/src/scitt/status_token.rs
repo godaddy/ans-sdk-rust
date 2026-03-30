@@ -28,6 +28,10 @@ use super::cose::{compute_sig_structure_digest, parse_cose_sign1};
 use super::error::ScittError;
 use super::root_keys::ScittKeyStore;
 
+/// Maximum clock skew tolerance (24 hours). Larger values would make tokens
+/// effectively non-expirable.
+const MAX_CLOCK_SKEW_TOLERANCE_SECS: u64 = 24 * 60 * 60;
+
 /// A status token whose COSE signature has been verified and expiry checked.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -61,11 +65,11 @@ pub fn verify_status_token(
     let parsed = parse_cose_sign1(token_bytes)?;
 
     // Step 2: verify ECDSA P-256 signature
-    let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload);
+    let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload)?;
     let sig = Signature::from_slice(&parsed.signature).map_err(|_| {
-        ScittError::InvalidSignatureLength {
-            actual: parsed.signature.len(),
-        }
+        // Length is already validated as 64 bytes by parse_cose_sign1;
+        // from_slice failure here means the bytes are not a valid P1363 encoding.
+        ScittError::SignatureInvalid
     })?;
     let trusted_key = key_store.get(parsed.protected.kid)?;
     trusted_key
@@ -78,7 +82,10 @@ pub fn verify_status_token(
 
     // Step 4: check expiry
     let now = chrono::Utc::now().timestamp();
-    let tolerance = i64::try_from(clock_skew_tolerance.as_secs()).unwrap_or(i64::MAX);
+    let capped_secs = clock_skew_tolerance
+        .as_secs()
+        .min(MAX_CLOCK_SKEW_TOLERANCE_SECS);
+    let tolerance = i64::try_from(capped_secs).unwrap_or(i64::MAX);
     if now > payload.exp.saturating_add(tolerance) {
         return Err(ScittError::TokenExpired {
             exp: payload.exp,
@@ -450,7 +457,7 @@ mod tests {
     /// Sign a payload and return a valid COSE_Sign1 token bytes.
     fn make_token(signing_key: &SigningKey, payload: &[u8]) -> Vec<u8> {
         let protected_bytes = build_protected_bytes(signing_key);
-        let digest = compute_sig_structure_digest(&protected_bytes, payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -701,7 +708,7 @@ mod tests {
         );
         // Build the token, then flip one signature byte
         let protected_bytes = build_protected_bytes(&signing_key);
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload_bytes);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload_bytes).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let mut sig_bytes = sig.to_bytes().to_vec();
         sig_bytes[0] ^= 0xFF; // flip a byte

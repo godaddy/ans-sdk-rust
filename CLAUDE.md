@@ -157,13 +157,13 @@ SCITT-enhanced verification (`verify_server_with_scitt` / `verify_client_with_sc
 5. Result is `VerificationOutcome::ScittVerified` with verification tier
 
 Fallback behavior (governed by `ScittTierPolicy`):
-- `ScittWithBadgeFallback` (default): SCITT first, badge fallback if no headers
+- `ScittWithBadgeFallback` (default): SCITT first, badge fallback only if headers absent
 - `RequireScitt`: SCITT required, no badge fallback
-- `BadgeWithScittEnhancement`: Badge first, SCITT enhances if available
+- `BadgeWithScittEnhancement`: Badge first, SCITT enhances if headers present
 
 Key rules:
-- Present-but-corrupt headers = REJECT (prevents MITM downgrade)
-- Exception: `TokenExpired` = falls back to badge (expired != tampered)
+- Present headers are final: any SCITT failure (including `TokenExpired`) = REJECT, no badge fallback
+- Badge fallback only when SCITT headers are completely absent
 - Terminal status (`REVOKED`/`EXPIRED`) = always reject regardless of policy
 
 ### Key Traits

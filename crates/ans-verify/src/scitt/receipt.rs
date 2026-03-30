@@ -38,7 +38,12 @@ pub struct VerifiedReceipt {
     pub tree_size: u64,
     /// Leaf index in the transparency log.
     pub leaf_index: u64,
-    /// Verified Merkle root hash (computed from the proven leaf + inclusion path).
+    /// Merkle root hash computed from the proven leaf + inclusion path.
+    ///
+    /// Note: the inclusion path comes from the unsigned (unprotected) COSE
+    /// header. The COSE signature proves the TL attested to this event; the
+    /// root hash is useful for external log monitors verifying append-only
+    /// consistency, not for per-request trust.
     pub root_hash: [u8; 32],
     /// The event payload bytes from the COSE payload.
     pub event_bytes: Vec<u8>,
@@ -108,11 +113,11 @@ pub fn verify_receipt(
     let trusted_key = key_store.get(parsed.protected.kid)?;
 
     // Step 4: verify ECDSA P-256 signature
-    let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload);
+    let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload)?;
     let sig = Signature::from_slice(&parsed.signature).map_err(|_| {
-        ScittError::InvalidSignatureLength {
-            actual: parsed.signature.len(),
-        }
+        // Length is already validated as 64 bytes by parse_cose_sign1;
+        // from_slice failure here means the bytes are not a valid P1363 encoding.
+        ScittError::SignatureInvalid
     })?;
     trusted_key
         .key
@@ -426,7 +431,7 @@ mod tests {
         let payload = event.to_vec();
 
         // Sign
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -525,7 +530,7 @@ mod tests {
 
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let mut sig_bytes = sig.to_bytes().to_vec();
         sig_bytes[0] ^= 0xFF; // flip a byte
@@ -564,7 +569,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -590,7 +595,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -626,7 +631,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -662,7 +667,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -723,7 +728,7 @@ mod tests {
         ciborium::ser::into_writer(&map, &mut protected_bytes).unwrap();
 
         let payload = b"event".to_vec();
-        let sig_digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let sig_digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&sig_digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -772,7 +777,7 @@ mod tests {
         ciborium::ser::into_writer(&map, &mut protected_bytes).unwrap();
 
         let payload = b"event".to_vec();
-        let sig_digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let sig_digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&sig_digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -822,7 +827,7 @@ mod tests {
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         // Sign the real payload
         let real_payload = b"real-event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &real_payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &real_payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -851,7 +856,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -892,7 +897,7 @@ mod tests {
         let (signing_key, store) = make_key_and_store(1);
         let protected_bytes = build_receipt_protected_bytes(&signing_key);
         let payload = b"event".to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 

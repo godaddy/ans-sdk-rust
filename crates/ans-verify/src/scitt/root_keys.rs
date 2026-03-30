@@ -99,6 +99,39 @@ impl ScittKeyStore {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+
+    /// Create a new store containing all keys from `self` plus any newly
+    /// parsed keys from `additional_key_strings`.
+    ///
+    /// - Keys already present (same `kid`) are kept unchanged.
+    /// - New valid keys are merged in.
+    /// - Invalid keys in `additional_key_strings` are warned and skipped.
+    ///
+    /// Unlike [`from_c2sp_keys`](Self::from_c2sp_keys), this method never
+    /// returns an error: if zero new keys are parsed, the existing keys are
+    /// still present.
+    pub fn merge_from(&self, additional_key_strings: &[String]) -> Self {
+        let mut keys = self.keys.clone();
+        let before = keys.len();
+
+        for key_string in additional_key_strings {
+            match parse_c2sp_key(key_string) {
+                Ok(trusted_key) => {
+                    keys.entry(trusted_key.kid).or_insert(trusted_key);
+                }
+                Err(err) => {
+                    warn!(key = %key_string, error = %err, "Skipping invalid C2SP key during merge");
+                }
+            }
+        }
+
+        let added = keys.len() - before;
+        if added > 0 {
+            tracing::debug!(added, total = keys.len(), "Merged new root keys into store");
+        }
+
+        Self { keys }
+    }
 }
 
 /// Parse a single C2SP key string into its components.
@@ -392,5 +425,68 @@ mod tests {
         let store = ScittKeyStore::from_c2sp_keys(&[k1]).unwrap();
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
+    }
+
+    // ── merge_from ──
+
+    #[test]
+    fn merge_from_adds_new_key() {
+        let (k1, trusted1) = make_c2sp_key(1, "tl.example.com");
+        let (k2, trusted2) = make_c2sp_key(2, "tl2.example.com");
+        let store = ScittKeyStore::from_c2sp_keys(&[k1]).unwrap();
+        assert_eq!(store.len(), 1);
+
+        let merged = store.merge_from(&[k2]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.get(trusted1.kid).is_ok());
+        assert!(merged.get(trusted2.kid).is_ok());
+    }
+
+    #[test]
+    fn merge_from_does_not_overwrite_existing_key() {
+        let (k1, trusted1) = make_c2sp_key(1, "tl.example.com");
+        let store = ScittKeyStore::from_c2sp_keys(&[k1.clone()]).unwrap();
+        let original_der = store
+            .get(trusted1.kid)
+            .unwrap()
+            .key
+            .to_public_key_der()
+            .unwrap();
+
+        // Merge the same key string again — should not replace
+        let merged = store.merge_from(&[k1]);
+        assert_eq!(merged.len(), 1);
+        let after_der = merged
+            .get(trusted1.kid)
+            .unwrap()
+            .key
+            .to_public_key_der()
+            .unwrap();
+        assert_eq!(original_der.as_bytes(), after_der.as_bytes());
+    }
+
+    #[test]
+    fn merge_from_with_empty_input_returns_same_keys() {
+        let (k1, trusted1) = make_c2sp_key(1, "tl.example.com");
+        let (k2, trusted2) = make_c2sp_key(2, "tl2.example.com");
+        let store = ScittKeyStore::from_c2sp_keys(&[k1, k2]).unwrap();
+        assert_eq!(store.len(), 2);
+
+        let merged = store.merge_from(&[]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.get(trusted1.kid).is_ok());
+        assert!(merged.get(trusted2.kid).is_ok());
+    }
+
+    #[test]
+    fn merge_from_skips_invalid_keys() {
+        let (k1, trusted1) = make_c2sp_key(1, "tl.example.com");
+        let (k2, trusted2) = make_c2sp_key(2, "tl2.example.com");
+        let store = ScittKeyStore::from_c2sp_keys(&[k1]).unwrap();
+
+        let merged = store.merge_from(&["not+valid".to_string(), k2, "also+bad".to_string()]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.get(trusted1.kid).is_ok());
+        assert!(merged.get(trusted2.kid).is_ok());
     }
 }

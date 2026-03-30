@@ -21,10 +21,12 @@ mod error;
 mod headers;
 mod merkle;
 mod receipt;
+mod refreshable_key_store;
 mod root_keys;
 mod scitt_cache;
 mod status_token;
 mod supplier;
+mod verification_cache;
 
 pub use client::{HttpScittClient, ScittClient};
 pub use cose::{
@@ -35,12 +37,14 @@ pub use error::ScittError;
 pub use headers::ScittHeaders;
 pub use merkle::{compute_leaf_hash, verify_merkle_inclusion};
 pub use receipt::{VerifiedReceipt, verify_receipt};
+pub use refreshable_key_store::{KeyRefreshHandle, RefreshableKeyStore};
 pub use root_keys::{ScittKeyStore, TrustedKey, parse_c2sp_key};
 pub use scitt_cache::{ReceiptCache, StatusTokenCache};
 pub use status_token::{
     VerifiedStatusToken, matches_identity_cert, matches_server_cert, verify_status_token,
 };
 pub use supplier::{ScittHeaderSupplier, ScittOutgoingHeaders, ScittRefreshHandle};
+pub use verification_cache::{CachedScittOutcome, ScittVerificationCache, hash_bytes};
 
 #[cfg(any(test, feature = "test-support"))]
 pub use client::MockScittClient;

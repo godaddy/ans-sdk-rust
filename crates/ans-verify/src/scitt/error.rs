@@ -187,22 +187,27 @@ impl ScittError {
         matches!(self, Self::TerminalStatus(_) | Self::AgentTerminal { .. })
     }
 
-    /// Returns `true` if this error should trigger fallback to badge verification
-    /// under the `ScittWithBadgeFallback` policy.
+    /// Returns `true` if this error is a non-integrity transport/availability
+    /// failure from the SCITT client (agent-side supplier), not a verification
+    /// failure.
     ///
-    /// Only non-integrity failures fall back:
-    /// - `TokenExpired`: stale, not tampered
+    /// The built-in verifier does **not** use this method — when SCITT headers
+    /// are present, the verification result is final with no badge fallback.
+    /// This method exists for custom integrations that need to distinguish
+    /// transport failures from integrity failures.
+    ///
+    /// Non-integrity failures:
     /// - `NotSupported`: TL doesn't support SCITT
     /// - `NotFound`: agent not yet registered for SCITT
-    /// - `UnexpectedHttpStatus`: TL returned an error (transient, not integrity)
+    /// - `UnexpectedHttpStatus`: TL returned an error (transient)
     /// - `HttpError`: transport failure (network, timeout)
     ///
-    /// All integrity failures (structural, crypto, Merkle) are hard rejects.
+    /// All integrity failures (structural, crypto, Merkle, expired) are
+    /// **not** included.
     pub fn should_fallback_to_badge(&self) -> bool {
         matches!(
             self,
-            Self::TokenExpired { .. }
-                | Self::NotSupported { .. }
+            Self::NotSupported { .. }
                 | Self::NotFound { .. }
                 | Self::UnexpectedHttpStatus { .. }
                 | Self::HttpError(_)
@@ -384,7 +389,6 @@ mod tests {
 
     #[test]
     fn fallback_for_non_integrity_errors() {
-        assert!(ScittError::TokenExpired { exp: 0, now: 3600 }.should_fallback_to_badge());
         assert!(
             ScittError::NotSupported {
                 endpoint: "https://tl.example.com".to_string()
@@ -416,6 +420,7 @@ mod tests {
         assert!(!ScittError::CborDecodeError("bad".to_string()).should_fallback_to_badge());
         assert!(!ScittError::InvalidArrayLength { found: 3 }.should_fallback_to_badge());
         assert!(!ScittError::InvalidSignatureLength { actual: 32 }.should_fallback_to_badge());
+        assert!(!ScittError::TokenExpired { exp: 0, now: 3600 }.should_fallback_to_badge());
     }
 
     #[test]

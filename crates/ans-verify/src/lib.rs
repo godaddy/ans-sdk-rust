@@ -107,12 +107,12 @@ pub use rustls_verifier::{AnsClientCertVerifier, AnsServerCertVerifier};
 
 #[cfg(feature = "scitt")]
 pub use scitt::{
-    HttpScittClient, MAX_COSE_INPUT_SIZE, ParsedCoseSign1, ProtectedHeader, ReceiptCache,
-    ScittClient, ScittError, ScittHeaderSupplier, ScittHeaders, ScittKeyStore,
-    ScittOutgoingHeaders, ScittRefreshHandle, StatusTokenCache, TrustedKey, VerifiedReceipt,
-    VerifiedStatusToken, build_sig_structure, compute_leaf_hash, compute_sig_structure_digest,
-    matches_identity_cert, matches_server_cert, parse_c2sp_key, parse_cose_sign1,
-    verify_merkle_inclusion, verify_receipt, verify_status_token,
+    HttpScittClient, KeyRefreshHandle, MAX_COSE_INPUT_SIZE, ParsedCoseSign1, ProtectedHeader,
+    ReceiptCache, RefreshableKeyStore, ScittClient, ScittError, ScittHeaderSupplier, ScittHeaders,
+    ScittKeyStore, ScittOutgoingHeaders, ScittRefreshHandle, ScittVerificationCache,
+    StatusTokenCache, TrustedKey, VerifiedReceipt, VerifiedStatusToken, build_sig_structure,
+    compute_leaf_hash, compute_sig_structure_digest, matches_identity_cert, matches_server_cert,
+    parse_c2sp_key, parse_cose_sign1, verify_merkle_inclusion, verify_receipt, verify_status_token,
 };
 
 #[cfg(all(feature = "scitt", any(test, feature = "test-support")))]

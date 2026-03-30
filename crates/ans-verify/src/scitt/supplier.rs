@@ -25,13 +25,14 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::client::ScittClient;
 use super::error::ScittError;
 use super::receipt::verify_receipt;
+use super::refreshable_key_store::RefreshableKeyStore;
 use super::root_keys::ScittKeyStore;
 use super::status_token::verify_status_token;
 
@@ -60,6 +61,7 @@ pub struct ScittRefreshHandle {
 impl Drop for ScittRefreshHandle {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.task.abort();
     }
 }
 
@@ -87,9 +89,12 @@ struct CachedArtifacts {
 struct ScittHeaderSupplierInner {
     agent_id: Uuid,
     client: Arc<dyn ScittClient>,
-    key_store: Arc<ScittKeyStore>,
+    key_store: Arc<RefreshableKeyStore>,
     clock_skew: Duration,
     artifacts: RwLock<CachedArtifacts>,
+    /// Serialises the lazy-init path so that concurrent first-callers
+    /// don't all fetch redundantly.
+    init_gate: Mutex<()>,
 }
 
 impl std::fmt::Debug for ScittHeaderSupplierInner {
@@ -120,14 +125,15 @@ pub struct ScittHeaderSupplier {
 }
 
 impl ScittHeaderSupplier {
-    /// Create a supplier. Construction is infallible — no network calls.
+    /// Create a supplier with a refreshable key store.
     ///
-    /// The first call to [`current_headers`](Self::current_headers) or
+    /// Construction is infallible — no network calls. The first call to
+    /// [`current_headers`](Self::current_headers) or
     /// [`start_auto_refresh`](Self::start_auto_refresh) triggers the initial fetch.
     pub fn new(
         agent_id: Uuid,
         client: Arc<dyn ScittClient>,
-        key_store: Arc<ScittKeyStore>,
+        key_store: Arc<RefreshableKeyStore>,
     ) -> Self {
         Self {
             inner: Arc::new(ScittHeaderSupplierInner {
@@ -136,15 +142,30 @@ impl ScittHeaderSupplier {
                 key_store,
                 clock_skew: DEFAULT_CLOCK_SKEW,
                 artifacts: RwLock::new(CachedArtifacts::default()),
+                init_gate: Mutex::new(()),
             }),
         }
+    }
+
+    /// Create a supplier with a static key store (no refresh capability).
+    ///
+    /// Convenience constructor for tests and offline environments where root
+    /// keys are known ahead of time.
+    #[allow(clippy::needless_pass_by_value)] // Arc param is intentional public API
+    pub fn from_static_key_store(
+        agent_id: Uuid,
+        client: Arc<dyn ScittClient>,
+        key_store: Arc<ScittKeyStore>,
+    ) -> Self {
+        let refreshable = Arc::new(RefreshableKeyStore::from_static((*key_store).clone()));
+        Self::new(agent_id, client, refreshable)
     }
 
     /// Create a supplier with custom clock skew tolerance for token verification.
     pub fn with_clock_skew(
         agent_id: Uuid,
         client: Arc<dyn ScittClient>,
-        key_store: Arc<ScittKeyStore>,
+        key_store: Arc<RefreshableKeyStore>,
         clock_skew: Duration,
     ) -> Self {
         Self {
@@ -154,6 +175,7 @@ impl ScittHeaderSupplier {
                 key_store,
                 clock_skew,
                 artifacts: RwLock::new(CachedArtifacts::default()),
+                init_gate: Mutex::new(()),
             }),
         }
     }
@@ -207,12 +229,26 @@ impl ScittHeaderSupplier {
     ///
     /// If the status token has expired, returns `None` for the token field.
     pub async fn current_headers(&self) -> ScittOutgoingHeaders {
-        // Lazy init: fetch if either artifact is missing
+        // Lazy init: serialise via init_gate so concurrent first-callers
+        // don't all trigger redundant fetches.  Re-check artifact state
+        // inside the mutex (double-checked locking) so a failed first
+        // attempt doesn't permanently suppress retries.
         {
-            let artifacts = self.inner.artifacts.read().await;
-            if artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none() {
-                drop(artifacts); // release read lock before taking write path
-                Self::do_refresh_inner(&self.inner).await;
+            let needs_init = {
+                let artifacts = self.inner.artifacts.read().await;
+                artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none()
+            };
+            if needs_init {
+                let _guard = self.inner.init_gate.lock().await;
+                // Re-check inside the lock — another caller may have
+                // populated the artifacts while we were waiting.
+                let still_needs_init = {
+                    let artifacts = self.inner.artifacts.read().await;
+                    artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none()
+                };
+                if still_needs_init {
+                    Self::do_refresh_inner(&self.inner).await;
+                }
             }
         }
 
@@ -298,7 +334,8 @@ impl ScittHeaderSupplier {
         let bytes = inner.client.fetch_receipt(inner.agent_id).await?;
 
         // Verify before caching
-        let verified = verify_receipt(&bytes, &inner.key_store)?;
+        let snapshot = inner.key_store.current_snapshot().await;
+        let verified = verify_receipt(&bytes, &snapshot)?;
 
         tracing::debug!(
             agent_id = %inner.agent_id,
@@ -319,7 +356,8 @@ impl ScittHeaderSupplier {
         let bytes = inner.client.fetch_status_token(inner.agent_id).await?;
 
         // Verify before caching
-        let verified = verify_status_token(&bytes, &inner.key_store, inner.clock_skew)?;
+        let snapshot = inner.key_store.current_snapshot().await;
+        let verified = verify_status_token(&bytes, &snapshot, inner.clock_skew)?;
 
         tracing::debug!(
             agent_id = %inner.agent_id,
@@ -437,7 +475,7 @@ mod tests {
 
         let protected_bytes = build_protected_bytes(signing_key);
         let payload = event.to_vec();
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -520,7 +558,7 @@ mod tests {
         ciborium::ser::into_writer(&payload_map, &mut payload_bytes).unwrap();
 
         let protected_bytes = build_protected_bytes(signing_key);
-        let digest = compute_sig_structure_digest(&protected_bytes, &payload_bytes);
+        let digest = compute_sig_structure_digest(&protected_bytes, &payload_bytes).unwrap();
         let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
         let sig_bytes = sig.to_bytes().to_vec();
 
@@ -542,14 +580,16 @@ mod tests {
     fn new_is_infallible() {
         let (_, store) = make_key_and_store(1);
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let _supplier = ScittHeaderSupplier::new(Uuid::new_v4(), client, Arc::new(store));
+        let _supplier =
+            ScittHeaderSupplier::from_static_key_store(Uuid::new_v4(), client, Arc::new(store));
     }
 
     #[test]
     fn supplier_is_clone() {
         let (_, store) = make_key_and_store(1);
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let supplier = ScittHeaderSupplier::new(Uuid::new_v4(), client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(Uuid::new_v4(), client, Arc::new(store));
         let _cloned = supplier.clone();
     }
 
@@ -557,7 +597,8 @@ mod tests {
     fn supplier_debug() {
         let (_, store) = make_key_and_store(1);
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let supplier = ScittHeaderSupplier::new(Uuid::new_v4(), client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(Uuid::new_v4(), client, Arc::new(store));
         let dbg = format!("{supplier:?}");
         assert!(dbg.contains("ScittHeaderSupplier"));
     }
@@ -570,7 +611,8 @@ mod tests {
         let agent_id = Uuid::new_v4();
         // Client has no configured responses → NotFound errors
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let supplier = ScittHeaderSupplier::new(agent_id, client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(agent_id, client, Arc::new(store));
 
         let headers = supplier.current_headers().await;
         assert!(headers.receipt_base64.is_none());
@@ -593,7 +635,8 @@ mod tests {
                 .with_receipt(agent_id, receipt_bytes.clone())
                 .with_status_token(agent_id, token_bytes.clone()),
         );
-        let supplier = ScittHeaderSupplier::new(agent_id, client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(agent_id, client, Arc::new(store));
 
         let headers = supplier.current_headers().await;
         assert!(headers.receipt_base64.is_some());
@@ -621,7 +664,8 @@ mod tests {
         let client: Arc<dyn ScittClient> =
             Arc::new(MockScittClient::new().with_receipt(agent_id, receipt_bytes));
 
-        let supplier = ScittHeaderSupplier::new(agent_id, client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(agent_id, client, Arc::new(store));
 
         // Manually inject an expired token
         {
@@ -652,7 +696,8 @@ mod tests {
                 .with_receipt(agent_id, receipt_bytes)
                 .with_status_token(agent_id, token_bytes),
         );
-        let supplier = ScittHeaderSupplier::new(agent_id, client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(agent_id, client, Arc::new(store));
 
         // Initially empty
         {
@@ -679,7 +724,8 @@ mod tests {
         // Configure client with invalid receipt bytes
         let client: Arc<dyn ScittClient> =
             Arc::new(MockScittClient::new().with_receipt(agent_id, vec![0x00, 0x01, 0x02]));
-        let supplier = ScittHeaderSupplier::new(agent_id, client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(agent_id, client, Arc::new(store));
 
         let result = supplier.refresh_now().await;
         assert!(result.is_err());
@@ -691,7 +737,8 @@ mod tests {
     async fn auto_refresh_handle_debug() {
         let (_, store) = make_key_and_store(1);
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let supplier = ScittHeaderSupplier::new(Uuid::new_v4(), client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(Uuid::new_v4(), client, Arc::new(store));
 
         let handle = supplier.start_auto_refresh();
         let dbg = format!("{handle:?}");
@@ -703,7 +750,8 @@ mod tests {
     async fn auto_refresh_cancels_on_drop() {
         let (_, store) = make_key_and_store(1);
         let client: Arc<dyn ScittClient> = Arc::new(MockScittClient::new());
-        let supplier = ScittHeaderSupplier::new(Uuid::new_v4(), client, Arc::new(store));
+        let supplier =
+            ScittHeaderSupplier::from_static_key_store(Uuid::new_v4(), client, Arc::new(store));
 
         let cancel = {
             let handle = supplier.start_auto_refresh();

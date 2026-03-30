@@ -279,7 +279,7 @@ fn cbor_value_to_i64(v: &ciborium::Value) -> Option<i64> {
 ///     payload,        // bstr
 /// ]
 /// ```
-pub fn build_sig_structure(protected_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
+pub fn build_sig_structure(protected_bytes: &[u8], payload: &[u8]) -> Result<Vec<u8>, ScittError> {
     let sig_structure = ciborium::Value::Array(vec![
         ciborium::Value::Text("Signature1".to_string()),
         ciborium::Value::Bytes(protected_bytes.to_vec()),
@@ -288,21 +288,24 @@ pub fn build_sig_structure(protected_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
     ]);
 
     let mut out = Vec::new();
-    // Serializing a well-formed Value to Vec<u8> cannot produce an IO error.
-    // We use if-let to silently ignore the impossible error branch.
-    if ciborium::ser::into_writer(&sig_structure, &mut out).is_err() {
-        // This branch is unreachable: Vec<u8> never produces IO errors.
-        // Return empty to satisfy the type system without panicking.
-        return Vec::new();
-    }
-    out
+    ciborium::ser::into_writer(&sig_structure, &mut out)
+        .map_err(|e| ScittError::CborDecodeError(format!("Sig_structure serialization: {e}")))?;
+    Ok(out)
 }
 
 /// Returns the SHA-256 digest of the `Sig_structure`, ready for ECDSA `verify_prehash`.
-pub fn compute_sig_structure_digest(protected_bytes: &[u8], payload: &[u8]) -> [u8; 32] {
-    let sig_structure_bytes = build_sig_structure(protected_bytes, payload);
+///
+/// # Errors
+///
+/// Returns [`ScittError::CborDecodeError`] if CBOR serialization fails (should not
+/// happen with well-formed inputs).
+pub fn compute_sig_structure_digest(
+    protected_bytes: &[u8],
+    payload: &[u8],
+) -> Result<[u8; 32], ScittError> {
+    let sig_structure_bytes = build_sig_structure(protected_bytes, payload)?;
     let digest = Sha256::digest(&sig_structure_bytes);
-    digest.into()
+    Ok(digest.into())
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -669,7 +672,7 @@ mod tests {
         let protected_bytes = b"\xa1\x01\x26"; // minimal: {1: -7}
         let payload = b"hello";
 
-        let sig_structure = build_sig_structure(protected_bytes, payload);
+        let sig_structure = build_sig_structure(protected_bytes, payload).unwrap();
 
         // Decode it and verify the structure
         let decoded: ciborium::Value = ciborium::de::from_reader(sig_structure.as_slice()).unwrap();
@@ -691,7 +694,7 @@ mod tests {
         let raw_protected = b"\xff\xfe\xfd";
         let payload = b"payload";
 
-        let sig_structure = build_sig_structure(raw_protected, payload);
+        let sig_structure = build_sig_structure(raw_protected, payload).unwrap();
         let decoded: ciborium::Value = ciborium::de::from_reader(sig_structure.as_slice()).unwrap();
         match decoded {
             ciborium::Value::Array(arr) => {
@@ -709,9 +712,9 @@ mod tests {
         let protected_bytes = b"\xa1\x01\x26";
         let payload = b"hello";
 
-        let sig_structure = build_sig_structure(protected_bytes, payload);
+        let sig_structure = build_sig_structure(protected_bytes, payload).unwrap();
         let expected: [u8; 32] = Sha256::digest(&sig_structure).into();
-        let actual = compute_sig_structure_digest(protected_bytes, payload);
+        let actual = compute_sig_structure_digest(protected_bytes, payload).unwrap();
         assert_eq!(actual, expected);
     }
 }

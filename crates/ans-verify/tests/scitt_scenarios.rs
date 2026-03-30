@@ -6,6 +6,7 @@
 //! COSE_Sign1 artifacts are built in-process with a test P-256 key pair.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ans_types::*;
 use ans_verify::*;
@@ -215,7 +216,7 @@ fn build_cbor_payload(
 
 fn sign_cose(signing_key: &SigningKey, payload: &[u8]) -> Vec<u8> {
     let protected_bytes = build_protected_bytes(signing_key);
-    let digest = compute_sig_structure_digest(&protected_bytes, payload);
+    let digest = compute_sig_structure_digest(&protected_bytes, payload).unwrap();
     let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
     let sig_bytes = sig.to_bytes().to_vec();
     let array = ciborium::Value::Array(vec![
@@ -253,30 +254,6 @@ async fn make_scitt_verifier(
     policy: ScittTierPolicy,
 ) -> AnsVerifier {
     let badge = make_badge(host, "v1.0.0", server_fp, identity_fp);
-    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
-
-    let dns = Arc::new(MockDnsResolver::new().with_records(host, vec![record]));
-    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
-
-    AnsVerifier::builder()
-        .dns_resolver(dns)
-        .tlog_client(tlog)
-        .scitt_config(ScittConfig::new().with_tier_policy(policy))
-        .scitt_key_store(key_store)
-        .build()
-        .await
-        .expect("test verifier build should succeed")
-}
-
-async fn make_scitt_verifier_with_status(
-    host: &str,
-    server_fp: &str,
-    identity_fp: &str,
-    status: BadgeStatus,
-    key_store: Arc<ScittKeyStore>,
-    policy: ScittTierPolicy,
-) -> AnsVerifier {
-    let badge = make_badge_with_status(host, "v1.0.0", server_fp, identity_fp, status);
     let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
 
     let dns = Arc::new(MockDnsResolver::new().with_records(host, vec![record]));
@@ -440,7 +417,7 @@ async fn test_s2_1_missing_receipt_header() {
     }
 }
 
-/// S2.2: Missing status token header → badge fallback
+/// S2.2: Receipt present but no status token → reject (headers present = SCITT final)
 #[tokio::test]
 async fn test_s2_2_missing_token_header() {
     let (_, store) = make_key_and_store(1);
@@ -455,15 +432,21 @@ async fn test_s2_2_missing_token_header() {
     )
     .await;
     let cert = server_cert(HOST, SERVER_FP);
-    // Receipt present but no token — token is required for SCITT
+    // Receipt present but no token — headers are present so SCITT result is final
     let headers = ScittHeaders::from_base64(Some("aGVsbG8="), None).unwrap();
 
     let outcome = verifier
         .verify_server_with_scitt(HOST, &cert, &headers)
         .await;
-    // No status token → falls back to badge
-    assert!(outcome.is_success());
-    assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+    // Headers present without token = hard reject, no badge fallback
+    assert!(
+        !outcome.is_success(),
+        "Expected failure when receipt present but token missing"
+    );
+    assert!(
+        matches!(outcome, VerificationOutcome::ScittError(_)),
+        "Expected ScittError, got: {outcome:?}"
+    );
 }
 
 /// S2.3: Both headers absent → badge verification
@@ -571,9 +554,9 @@ async fn test_s3_5_token_signature_invalid() {
 // S4: Expired token behavior
 // =========================================================================
 
-/// S4.1: Expired token, valid badge → falls back to badge, Verified
+/// S4.1: Expired token with headers present → hard reject (no badge fallback)
 #[tokio::test]
-async fn test_s4_1_expired_token_valid_badge() {
+async fn test_s4_1_expired_token_with_headers_rejects() {
     let (signing_key, store) = make_key_and_store(1);
     let store = Arc::new(store);
     let token = make_expired_token(&signing_key, SERVER_FP);
@@ -592,25 +575,24 @@ async fn test_s4_1_expired_token_valid_badge() {
     let outcome = verifier
         .verify_server_with_scitt(HOST, &cert, &headers)
         .await;
-    // TokenExpired → badge fallback → success
-    assert!(outcome.is_success());
-    assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+    // Headers present + expired token = hard reject (no badge fallback)
+    assert!(!outcome.is_success());
+    assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
 }
 
-/// S4.2: Expired token, revoked badge → InvalidStatus
+/// S4.2: Expired token with RequireScitt → also rejects
 #[tokio::test]
-async fn test_s4_2_expired_token_revoked_badge() {
+async fn test_s4_2_expired_token_require_scitt_rejects() {
     let (signing_key, store) = make_key_and_store(1);
     let store = Arc::new(store);
     let token = make_expired_token(&signing_key, SERVER_FP);
 
-    let verifier = make_scitt_verifier_with_status(
+    let verifier = make_scitt_verifier(
         HOST,
         SERVER_FP,
         IDENTITY_FP,
-        BadgeStatus::Revoked,
         store,
-        ScittTierPolicy::ScittWithBadgeFallback,
+        ScittTierPolicy::RequireScitt,
     )
     .await;
     let cert = server_cert(HOST, SERVER_FP);
@@ -619,9 +601,8 @@ async fn test_s4_2_expired_token_revoked_badge() {
     let outcome = verifier
         .verify_server_with_scitt(HOST, &cert, &headers)
         .await;
-    // TokenExpired → badge fallback → badge is revoked → InvalidStatus
     assert!(!outcome.is_success());
-    assert!(matches!(outcome, VerificationOutcome::InvalidStatus { .. }));
+    assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
 }
 
 // =========================================================================
@@ -985,7 +966,10 @@ async fn test_terminal_status_revoked_hard_reject() {
         .verify_server_with_scitt(HOST, &cert, &headers)
         .await;
     assert!(!outcome.is_success());
-    assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+    assert!(
+        matches!(outcome, VerificationOutcome::ScittError(_)),
+        "Expected ScittError for REVOKED status"
+    );
 }
 
 /// Terminal status (EXPIRED) in token → hard reject regardless of policy
@@ -1011,4 +995,578 @@ async fn test_terminal_status_expired_hard_reject() {
         .await;
     assert!(!outcome.is_success());
     assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+}
+
+// =========================================================================
+// S9 — On-demand key refresh scenarios
+// =========================================================================
+
+/// Helper: build a C2SP key string from a seed byte.
+fn make_c2sp_key_string(seed: u8) -> String {
+    let signing_key = SigningKey::from_slice(&[seed; 32]).unwrap();
+    let verifying_key = signing_key.verifying_key();
+    let spki_doc = verifying_key.to_public_key_der().unwrap();
+    let spki_der = spki_doc.as_bytes();
+    let digest = Sha256::digest(spki_der);
+    let kid: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+    let key_hash_hex = hex::encode(kid);
+    let spki_b64 = BASE64_STANDARD.encode(spki_der);
+    format!("tl.example.com+{key_hash_hex}+{spki_b64}")
+}
+
+/// S9.1: Unknown key ID triggers on-demand refresh and verification succeeds.
+///
+/// The initial key store has key A (seed=1). A status token is signed with
+/// key B (seed=2). The mock client returns key B from `fetch_root_keys()`.
+/// The verifier should detect `UnknownKeyId`, refresh, and succeed.
+#[tokio::test]
+async fn test_s9_1_unknown_key_triggers_refresh_and_succeeds() {
+    // Key A (seed=1) is in the initial store
+    let key_a_string = make_c2sp_key_string(1);
+    let initial_store = ScittKeyStore::from_c2sp_keys(&[key_a_string]).unwrap();
+
+    // Key B (seed=2) is NOT in the initial store — will be returned by mock
+    let (signing_key_b, _) = make_key_and_store(2);
+    let key_b_string = make_c2sp_key_string(2);
+
+    // Mock client returns key B on root_keys fetch
+    let mock_scitt_client = MockScittClient::new().with_root_keys(vec![key_b_string]);
+
+    // Build a RefreshableKeyStore with the mock client
+    let refreshable = Arc::new(RefreshableKeyStore::new(
+        initial_store,
+        Arc::new(mock_scitt_client),
+    ));
+
+    // Build verifier using the refreshable store
+    let badge = make_badge(HOST, "v1.0.0", SERVER_FP, IDENTITY_FP);
+    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
+    let dns = Arc::new(MockDnsResolver::new().with_records(HOST, vec![record]));
+    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
+
+    let verifier = AnsVerifier::builder()
+        .dns_resolver(dns)
+        .tlog_client(tlog)
+        .scitt_config(ScittConfig::new().with_tier_policy(ScittTierPolicy::ScittWithBadgeFallback))
+        .scitt_refreshable_key_store(refreshable)
+        .build()
+        .await
+        .expect("build should succeed");
+
+    // Sign token with key B (not in initial store)
+    let token = make_server_token(&signing_key_b, SERVER_FP);
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+
+    // Should succeed — on-demand refresh fetched key B
+    assert!(
+        outcome.is_success(),
+        "Expected success after on-demand key refresh, got: {outcome:?}"
+    );
+    assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+}
+
+/// Helper: build a SCITT-enabled verifier with `with_caching()` (enables both
+/// badge caching and SCITT verification caching).
+async fn make_cached_scitt_verifier(
+    host: &str,
+    server_fp: &str,
+    identity_fp: &str,
+    key_store: Arc<ScittKeyStore>,
+    policy: ScittTierPolicy,
+) -> AnsVerifier {
+    let badge = make_badge(host, "v1.0.0", server_fp, identity_fp);
+    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
+
+    let dns = Arc::new(MockDnsResolver::new().with_records(host, vec![record]));
+    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
+
+    AnsVerifier::builder()
+        .dns_resolver(dns)
+        .tlog_client(tlog)
+        .scitt_config(ScittConfig::new().with_tier_policy(policy))
+        .scitt_key_store(key_store)
+        .with_caching()
+        .build()
+        .await
+        .expect("test verifier build should succeed")
+}
+
+/// S9.2: Unknown key ID within cooldown returns error immediately.
+///
+/// The refreshable store was just refreshed (within cooldown). The verifier
+/// should NOT make another network call and should return the original
+/// UnknownKeyId as a ScittError.
+#[tokio::test]
+async fn test_s9_2_unknown_key_within_cooldown_returns_error() {
+    // Key A (seed=1) is in the initial store
+    let key_a_string = make_c2sp_key_string(1);
+    let initial_store = ScittKeyStore::from_c2sp_keys(&[key_a_string.clone()]).unwrap();
+
+    // Key B (seed=3) — token will be signed with this, but mock only returns key A
+    let (signing_key_b, _) = make_key_and_store(3);
+
+    // Mock client returns only key A (not key B) — refresh won't help
+    let mock_scitt_client = MockScittClient::new().with_root_keys(vec![key_a_string]);
+
+    // Use a very long cooldown (1 hour) so we're always within it
+    let refreshable = Arc::new(RefreshableKeyStore::with_cooldown(
+        initial_store,
+        Arc::new(mock_scitt_client),
+        Duration::from_secs(3600),
+    ));
+
+    // Force an initial refresh so last_refreshed is set (within cooldown)
+    refreshable.do_refresh().await.unwrap();
+
+    // Build verifier
+    let badge = make_badge(HOST, "v1.0.0", SERVER_FP, IDENTITY_FP);
+    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
+    let dns = Arc::new(MockDnsResolver::new().with_records(HOST, vec![record]));
+    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
+
+    let verifier = AnsVerifier::builder()
+        .dns_resolver(dns)
+        .tlog_client(tlog)
+        .scitt_config(ScittConfig::new().with_tier_policy(ScittTierPolicy::RequireScitt))
+        .scitt_refreshable_key_store(refreshable)
+        .build()
+        .await
+        .expect("build should succeed");
+
+    // Sign token with key B (not in store, won't be found even after refresh)
+    let token = make_server_token(&signing_key_b, SERVER_FP);
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+
+    // Within cooldown — should fail with ScittError (no second network call)
+    assert!(
+        !outcome.is_success(),
+        "Expected failure within cooldown, got: {outcome:?}"
+    );
+    assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+}
+
+// =========================================================================
+// S10: Verification cache integration tests
+// =========================================================================
+
+/// S10.1: Repeated identical calls return consistent ScittVerified results.
+///
+/// After the first call does full ECDSA + fingerprint verification, the
+/// second call hits the Layer 2 outcome cache and returns the same result
+/// without re-doing any cryptographic work.
+#[tokio::test]
+async fn test_s10_1_repeated_calls_return_consistent_results() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call: full verification
+    let outcome1 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(outcome1.is_success());
+    let tier1 = match &outcome1 {
+        VerificationOutcome::ScittVerified { tier, .. } => *tier,
+        other => panic!("Expected ScittVerified, got: {other:?}"),
+    };
+
+    // Second call: should hit cache and return identical result
+    let outcome2 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(outcome2.is_success());
+    match &outcome2 {
+        VerificationOutcome::ScittVerified { tier, .. } => {
+            assert_eq!(*tier, tier1, "Cached result should have same tier");
+        }
+        other => panic!("Expected ScittVerified on second call, got: {other:?}"),
+    }
+}
+
+/// S10.2: Same token with different cert fingerprint — Layer 1 token
+/// cache hit but fingerprint comparison still runs and rejects.
+///
+/// The token lists SERVER_FP. The first call verifies with SERVER_FP cert
+/// (success). The second call uses WRONG_FP cert — the Layer 2 outcome
+/// cache misses (different cert), the Layer 1 token cache hits (same token
+/// bytes), but the fingerprint comparison correctly rejects.
+#[tokio::test]
+async fn test_s10_2_cached_token_different_cert_rejects() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call with correct cert → success (populates Layer 1 + Layer 2)
+    let cert_ok = server_cert(HOST, SERVER_FP);
+    let outcome1 = verifier
+        .verify_server_with_scitt(HOST, &cert_ok, &headers)
+        .await;
+    assert!(outcome1.is_success());
+
+    // Second call with wrong cert → Layer 2 misses, Layer 1 token hits,
+    // fingerprint comparison fails → ScittError
+    let cert_wrong = server_cert(HOST, WRONG_FP);
+    let outcome2 = verifier
+        .verify_server_with_scitt(HOST, &cert_wrong, &headers)
+        .await;
+    assert!(
+        !outcome2.is_success(),
+        "Wrong cert should still be rejected even with cached token"
+    );
+    assert!(matches!(outcome2, VerificationOutcome::ScittError(_)));
+}
+
+/// S10.3: Same token with two valid certs (renewal overlap) — both succeed.
+///
+/// Token lists both OLD_FP and NEW_FP. First call with OLD_FP populates
+/// caches. Second call with NEW_FP misses Layer 2 (different cert) but
+/// hits Layer 1 token cache and fingerprint match succeeds for NEW_FP too.
+#[tokio::test]
+async fn test_s10_3_cached_token_renewal_overlap_both_succeed() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let new_fp = "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // Token lists both SERVER_FP and new_fp
+    let payload = build_cbor_payload(
+        &nil_uuid(),
+        "ACTIVE",
+        future_exp(),
+        &format!("ans://v1.0.0.{HOST}"),
+        &[],
+        &[
+            (SERVER_FP.to_string(), "X509-DV-SERVER".to_string()),
+            (new_fp.to_string(), "X509-DV-SERVER".to_string()),
+        ],
+    );
+    let token = sign_cose(&signing_key, &payload);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call with old cert → populates caches
+    let cert_old = server_cert(HOST, SERVER_FP);
+    let outcome1 = verifier
+        .verify_server_with_scitt(HOST, &cert_old, &headers)
+        .await;
+    assert!(outcome1.is_success());
+
+    // Second call with new cert → Layer 1 token cache hit, fingerprint ok
+    let cert_new = server_cert(HOST, new_fp);
+    let outcome2 = verifier
+        .verify_server_with_scitt(HOST, &cert_new, &headers)
+        .await;
+    assert!(
+        outcome2.is_success(),
+        "New cert should succeed via cached token + fingerprint match"
+    );
+    assert!(matches!(
+        outcome2,
+        VerificationOutcome::ScittVerified { .. }
+    ));
+}
+
+/// S10.4: Errors are not cached — bad signature fails on every call.
+///
+/// A token signed with key B but verified against key A's store fails.
+/// Repeating the call should fail again (errors must not be cached).
+#[tokio::test]
+async fn test_s10_4_errors_not_cached() {
+    let (signing_key, _) = make_key_and_store(1);
+    let (_, wrong_store) = make_key_and_store(2);
+    let wrong_store = Arc::new(wrong_store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        wrong_store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call: signature mismatch → ScittError
+    let outcome1 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(!outcome1.is_success());
+    assert!(matches!(outcome1, VerificationOutcome::ScittError(_)));
+
+    // Second call: should fail again (error was not cached)
+    let outcome2 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(!outcome2.is_success());
+    assert!(matches!(outcome2, VerificationOutcome::ScittError(_)));
+}
+
+/// S10.5: `with_caching()` enables SCITT verification cache automatically.
+///
+/// Verifies the builder's `with_caching()` method produces a working
+/// verifier with both badge and SCITT verification caching active.
+#[tokio::test]
+async fn test_s10_5_with_caching_enables_scitt_cache() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let badge = make_badge(HOST, "v1.0.0", SERVER_FP, IDENTITY_FP);
+    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
+    let dns = Arc::new(MockDnsResolver::new().with_records(HOST, vec![record]));
+    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
+
+    let verifier = AnsVerifier::builder()
+        .dns_resolver(dns)
+        .tlog_client(tlog)
+        .scitt_config(ScittConfig::new().with_tier_policy(ScittTierPolicy::ScittWithBadgeFallback))
+        .scitt_key_store(store)
+        .with_caching()
+        .build()
+        .await
+        .expect("build should succeed");
+
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // Verify twice — should succeed both times (second hits cache)
+    for i in 0..2 {
+        let outcome = verifier
+            .verify_server_with_scitt(HOST, &cert, &headers)
+            .await;
+        assert!(
+            outcome.is_success(),
+            "Call {i} should succeed with caching enabled"
+        );
+        assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+    }
+}
+
+/// S10.6: `with_scitt_verification_cache()` explicit cache builder method.
+///
+/// Tests the explicit cache builder method with custom max entries.
+#[tokio::test]
+async fn test_s10_6_explicit_cache_builder_method() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let badge = make_badge(HOST, "v1.0.0", SERVER_FP, IDENTITY_FP);
+    let record = dns_record(Some(Version::new(1, 0, 0)), BADGE_URL);
+    let dns = Arc::new(MockDnsResolver::new().with_records(HOST, vec![record]));
+    let tlog = Arc::new(MockTransparencyLogClient::new().with_badge(BADGE_URL, badge));
+
+    let custom_cache = ScittVerificationCache::new(50);
+    let verifier = AnsVerifier::builder()
+        .dns_resolver(dns)
+        .tlog_client(tlog)
+        .scitt_config(ScittConfig::new().with_tier_policy(ScittTierPolicy::ScittWithBadgeFallback))
+        .scitt_key_store(store)
+        .with_scitt_verification_cache(custom_cache)
+        .build()
+        .await
+        .expect("build should succeed");
+
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(outcome.is_success());
+    assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+}
+
+/// S10.7: mTLS cached verification — same token verified for client identity.
+///
+/// Tests that the verification cache works correctly for the client
+/// (mTLS) path in addition to the server path.
+#[tokio::test]
+async fn test_s10_7_mtls_cached_verification() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_identity_token(&signing_key, IDENTITY_FP);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = mtls_cert(HOST, "v1.0.0", IDENTITY_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call: full verification
+    let outcome1 = verifier.verify_client_with_scitt(&cert, &headers).await;
+    assert!(outcome1.is_success());
+    assert!(matches!(
+        outcome1,
+        VerificationOutcome::ScittVerified { .. }
+    ));
+
+    // Second call: cache hit
+    let outcome2 = verifier.verify_client_with_scitt(&cert, &headers).await;
+    assert!(outcome2.is_success());
+    assert!(matches!(
+        outcome2,
+        VerificationOutcome::ScittVerified { .. }
+    ));
+}
+
+/// S10.8: Terminal status is not cached — REVOKED always rejects.
+///
+/// Ensures that terminal-status errors (REVOKED, EXPIRED) from the token
+/// are never stored in the cache. Each call should independently reject.
+#[tokio::test]
+async fn test_s10_8_terminal_status_not_cached() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token_with_status(&signing_key, SERVER_FP, "REVOKED");
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // Both calls should reject — REVOKED must never be cached
+    for i in 0..2 {
+        let outcome = verifier
+            .verify_server_with_scitt(HOST, &cert, &headers)
+            .await;
+        assert!(
+            !outcome.is_success(),
+            "Call {i}: REVOKED should always reject"
+        );
+        assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+    }
+}
+
+/// S10.9: BadgeWithScittEnhancement policy caches ScittVerified outcomes.
+///
+/// Tests that the cache works correctly with the badge-first policy.
+#[tokio::test]
+async fn test_s10_9_badge_enhancement_cached() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let verifier = make_cached_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::BadgeWithScittEnhancement,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers = ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap();
+
+    // First call: badge then SCITT enhancement
+    let outcome1 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(outcome1.is_success());
+    assert!(matches!(
+        outcome1,
+        VerificationOutcome::ScittVerified { .. }
+    ));
+
+    // Second call: SCITT part hits cache
+    let outcome2 = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(outcome2.is_success());
+    assert!(matches!(
+        outcome2,
+        VerificationOutcome::ScittVerified { .. }
+    ));
+}
+
+/// S10.10: Many concurrent verifications of the same token.
+///
+/// Stresses the cache with concurrent calls to verify the same token,
+/// ensuring no panics, data races, or inconsistent results.
+#[tokio::test]
+async fn test_s10_10_concurrent_cached_verifications() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    let verifier = Arc::new(
+        make_cached_scitt_verifier(
+            HOST,
+            SERVER_FP,
+            IDENTITY_FP,
+            store,
+            ScittTierPolicy::ScittWithBadgeFallback,
+        )
+        .await,
+    );
+    let cert = Arc::new(server_cert(HOST, SERVER_FP));
+    let headers = Arc::new(ScittHeaders::from_base64(None, Some(&encode_b64(&token))).unwrap());
+
+    // Spawn 20 concurrent verifications
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let v = verifier.clone();
+        let c = cert.clone();
+        let h = headers.clone();
+        handles.push(tokio::spawn(async move {
+            let outcome = v.verify_server_with_scitt(HOST, &c, &h).await;
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
 }
