@@ -28,6 +28,7 @@
 pub mod badge;
 pub mod error;
 pub mod fingerprint;
+pub mod scitt;
 pub mod types;
 
 // Re-export commonly used types at crate root
@@ -37,4 +38,5 @@ pub use badge::{
 };
 pub use error::{CryptoError, ParseError};
 pub use fingerprint::CertFingerprint;
+pub use scitt::{CertEntry, StatusTokenPayload, VerificationTier};
 pub use types::{AnsName, Fqdn, Version};

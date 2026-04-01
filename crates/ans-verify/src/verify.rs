@@ -30,8 +30,8 @@ type ParsedCertData = (Option<String>, Vec<String>, Vec<String>);
 /// an X.509 certificate for ANS verification purposes.
 ///
 /// In production, construct via [`CertIdentity::from_der`]. The [`CertIdentity::new`]
-/// and [`CertIdentity::from_fingerprint_and_cn`] constructors are available only
-/// when the `test-support` feature is enabled.
+/// and [`CertIdentity::from_fingerprint_and_cn`] constructors are also public
+/// for programmatic use and testing.
 #[derive(Debug, Clone)]
 pub struct CertIdentity {
     /// Common Name (CN) from the certificate subject.
@@ -239,12 +239,53 @@ pub enum VerificationOutcome {
 
     /// Verification failed due to a DANE/TLSA error.
     DaneError(DaneError),
+
+    /// Verification succeeded via SCITT receipt + status token (offline).
+    ///
+    /// This variant indicates the highest-assurance verification path: the
+    /// agent's identity was verified via cryptographic proofs without any
+    /// DNS or transparency log queries.
+    #[cfg(feature = "scitt")]
+    ScittVerified {
+        /// The verified status token payload.
+        status_token: crate::scitt::VerifiedStatusToken,
+        /// The verification tier achieved.
+        tier: ans_types::VerificationTier,
+        /// The fingerprint that matched.
+        matched_fingerprint: CertFingerprint,
+        /// The badge, if badge verification was also performed.
+        badge: Option<Badge>,
+    },
+
+    /// SCITT verification failed (cryptographic or structural error).
+    #[cfg(feature = "scitt")]
+    ScittError(crate::scitt::ScittError),
 }
 
 impl VerificationOutcome {
     /// Check if verification was successful.
     pub fn is_success(&self) -> bool {
-        matches!(self, Self::Verified { .. })
+        match self {
+            Self::Verified { .. } => true,
+            #[cfg(feature = "scitt")]
+            Self::ScittVerified { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Check if the agent is in a terminal status (revoked, expired, etc.).
+    ///
+    /// Returns `true` for both badge-detected terminal status ([`InvalidStatus`])
+    /// and SCITT-detected terminal status ([`ScittError::TerminalStatus`] /
+    /// [`ScittError::AgentTerminal`]). Callers should use this instead of
+    /// pattern-matching individual variants.
+    pub fn is_terminal_status(&self) -> bool {
+        match self {
+            Self::InvalidStatus { status, .. } => status.should_reject(),
+            #[cfg(feature = "scitt")]
+            Self::ScittError(e) => e.is_terminal_status(),
+            _ => false,
+        }
     }
 
     /// Check if the agent is not registered with ANS.
@@ -260,11 +301,26 @@ impl VerificationOutcome {
             | Self::FingerprintMismatch { badge, .. }
             | Self::HostnameMismatch { badge, .. }
             | Self::AnsNameMismatch { badge, .. } => Some(badge),
+            #[cfg(feature = "scitt")]
+            Self::ScittVerified {
+                badge: Some(badge), ..
+            } => Some(badge),
             _ => None,
         }
     }
 
-    /// Convert to a Result.
+    /// Convert to a `Result`, returning the [`Badge`] on success.
+    ///
+    /// For badge-based verification, this is the natural accessor. For
+    /// SCITT-verified outcomes that may not carry a badge, prefer
+    /// [`into_scitt_result`](Self::into_scitt_result) which returns
+    /// `Option<Badge>` on success.
+    ///
+    /// When the `scitt` feature is enabled:
+    /// - `ScittVerified` with a badge → `Ok(badge)`
+    /// - `ScittVerified` without a badge → `Err(Configuration)` (use
+    ///   `into_scitt_result()` instead)
+    /// - `ScittError` → `Err(Scitt(..))`
     pub fn into_result(self) -> AnsResult<Badge> {
         match self {
             Self::Verified { badge, .. } => Ok(badge),
@@ -297,7 +353,101 @@ impl VerificationOutcome {
             Self::DaneError(e) => Err(AnsError::Verification(
                 VerificationError::DaneVerificationFailed(e),
             )),
+            #[cfg(feature = "scitt")]
+            Self::ScittVerified { badge, .. } => badge.ok_or_else(|| {
+                AnsError::Verification(VerificationError::Configuration(
+                    "ScittVerified without badge — use into_scitt_result() instead".to_string(),
+                ))
+            }),
+            #[cfg(feature = "scitt")]
+            Self::ScittError(e) => Err(AnsError::Scitt(e)),
         }
+    }
+
+    /// Convert a SCITT-aware outcome to a `Result`.
+    ///
+    /// Returns `Ok(Some(badge))` for badge or SCITT+badge verification,
+    /// `Ok(None)` for pure SCITT verification without a badge, and
+    /// `Err(..)` for any failure.
+    ///
+    /// This method is consistent with [`is_success()`](Self::is_success):
+    /// every outcome where `is_success()` returns `true` maps to `Ok(..)`.
+    #[cfg(feature = "scitt")]
+    pub fn into_scitt_result(self) -> AnsResult<Option<Badge>> {
+        match self {
+            Self::Verified { badge, .. } => Ok(Some(badge)),
+            Self::ScittVerified { badge, .. } => Ok(badge),
+            other => other.into_result().map(Some),
+        }
+    }
+}
+
+/// SCITT verification tier policy.
+///
+/// Controls how SCITT and badge verification interact.
+#[cfg(feature = "scitt")]
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub enum ScittTierPolicy {
+    /// Try SCITT first, fall back to badge if headers absent (recommended).
+    ///
+    /// Present headers are final: any SCITT failure (including `TokenExpired`)
+    /// is a hard reject with no badge fallback. Badge fallback only occurs
+    /// when SCITT headers are completely absent.
+    #[default]
+    ScittWithBadgeFallback,
+
+    /// SCITT required; fail if SCITT verification doesn't succeed.
+    ///
+    /// Only safe when 100% of peers support SCITT. `TokenExpired` is a
+    /// hard failure under this policy (no badge fallback available).
+    RequireScitt,
+
+    /// Badge first, enhance with SCITT if headers present.
+    ///
+    /// For gradual migration: existing badge verification runs first,
+    /// SCITT supplements the result if headers are available.
+    BadgeWithScittEnhancement,
+}
+
+/// Configuration for SCITT verification.
+#[cfg(feature = "scitt")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ScittConfig {
+    /// How SCITT and badge verification interact.
+    pub tier_policy: ScittTierPolicy,
+    /// Clock skew tolerance for status token expiry checks.
+    pub clock_skew_tolerance: Duration,
+}
+
+#[cfg(feature = "scitt")]
+impl Default for ScittConfig {
+    fn default() -> Self {
+        Self {
+            tier_policy: ScittTierPolicy::default(),
+            clock_skew_tolerance: Duration::from_secs(60),
+        }
+    }
+}
+
+#[cfg(feature = "scitt")]
+impl ScittConfig {
+    /// Create with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the tier policy.
+    pub fn with_tier_policy(mut self, policy: ScittTierPolicy) -> Self {
+        self.tier_policy = policy;
+        self
+    }
+
+    /// Set the clock skew tolerance.
+    pub fn with_clock_skew(mut self, tolerance: Duration) -> Self {
+        self.clock_skew_tolerance = tolerance;
+        self
     }
 }
 
@@ -912,6 +1062,12 @@ impl ServerVerifier {
                 AnsError::Verification(_) => VerificationOutcome::NotAnsAgent {
                     fqdn: fqdn.to_string(),
                 },
+                // SCITT errors should not reach badge-path error handling;
+                // if they do, treat as a generic verification failure.
+                #[cfg(feature = "scitt")]
+                AnsError::Scitt(_) => VerificationOutcome::NotAnsAgent {
+                    fqdn: fqdn.to_string(),
+                },
             },
             FailurePolicy::FailOpenWithCache { max_staleness } => {
                 if let Some(cache) = &self.cache {
@@ -930,6 +1086,12 @@ impl ServerVerifier {
                     AnsError::Certificate(e) => VerificationOutcome::CertError(e),
                     AnsError::Parse(e) => VerificationOutcome::ParseError(e),
                     AnsError::Verification(_) => VerificationOutcome::NotAnsAgent {
+                        fqdn: fqdn.to_string(),
+                    },
+                    // SCITT errors should not reach badge-path error handling;
+                    // if they do, treat as a generic verification failure.
+                    #[cfg(feature = "scitt")]
+                    AnsError::Scitt(_) => VerificationOutcome::NotAnsAgent {
                         fqdn: fqdn.to_string(),
                     },
                 }
@@ -1557,14 +1719,28 @@ pub struct AnsVerifier {
     client_verifier: ClientVerifier,
     #[cfg(feature = "rustls")]
     private_ca_pem: Option<Vec<u8>>,
+    #[cfg(feature = "scitt")]
+    scitt_config: Option<ScittConfig>,
+    #[cfg(feature = "scitt")]
+    scitt_key_store: Option<Arc<crate::scitt::RefreshableKeyStore>>,
+    #[cfg(feature = "scitt")]
+    scitt_verification_cache: Option<Arc<crate::scitt::ScittVerificationCache>>,
 }
 
 impl fmt::Debug for AnsVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AnsVerifier")
+        let builder = &mut f.debug_struct("AnsVerifier");
+        builder
             .field("server_verifier", &self.server_verifier)
-            .field("client_verifier", &self.client_verifier)
-            .finish_non_exhaustive()
+            .field("client_verifier", &self.client_verifier);
+        #[cfg(feature = "scitt")]
+        builder.field("has_scitt_config", &self.scitt_config.is_some());
+        #[cfg(feature = "scitt")]
+        builder.field(
+            "has_scitt_verification_cache",
+            &self.scitt_verification_cache.is_some(),
+        );
+        builder.finish_non_exhaustive()
     }
 }
 
@@ -1655,6 +1831,463 @@ impl AnsVerifier {
             )))
         })
     }
+
+    /// Verify an agent server with SCITT artifacts from HTTP headers.
+    ///
+    /// This implements the SCITT verification flow:
+    /// 1. If SCITT headers are present, verify status token signature + expiry + cert fingerprint
+    /// 2. If receipt is also present, verify Merkle inclusion proof → `FullScitt` tier
+    /// 3. If headers are absent, fall back to badge-based verification (per `ScittTierPolicy`)
+    ///
+    /// **Present headers are final**: if SCITT headers are present but
+    /// invalid/expired/corrupt, the result is a hard reject — badge
+    /// verification is never used as fallback. This prevents MITM downgrade.
+    ///
+    /// If `scitt_config` was not set on the builder, falls through to
+    /// badge-based `verify_server`.
+    #[cfg(feature = "scitt")]
+    pub async fn verify_server_with_scitt(
+        &self,
+        fqdn: impl AsRef<str>,
+        server_cert: &CertIdentity,
+        headers: &crate::scitt::ScittHeaders,
+    ) -> VerificationOutcome {
+        let fqdn_str = fqdn.as_ref();
+        let parsed_fqdn = match Fqdn::new(fqdn_str) {
+            Ok(f) => f,
+            Err(e) => return VerificationOutcome::ParseError(e),
+        };
+
+        let Some(config) = &self.scitt_config else {
+            // SCITT not configured — fall through to badge
+            return self.server_verifier.verify(&parsed_fqdn, server_cert).await;
+        };
+
+        let Some(key_store) = &self.scitt_key_store else {
+            // Defensive: builder.build() rejects this combination, but guard
+            // against direct struct construction in tests.
+            tracing::error!("BUG: scitt_config present but no key store — falling back to badge");
+            return self.server_verifier.verify(&parsed_fqdn, server_cert).await;
+        };
+
+        match config.tier_policy {
+            ScittTierPolicy::ScittWithBadgeFallback => {
+                self.verify_scitt_first(&parsed_fqdn, server_cert, headers, key_store, config, true)
+                    .await
+            }
+            ScittTierPolicy::RequireScitt => {
+                self.verify_scitt_first(
+                    &parsed_fqdn,
+                    server_cert,
+                    headers,
+                    key_store,
+                    config,
+                    false,
+                )
+                .await
+            }
+            ScittTierPolicy::BadgeWithScittEnhancement => {
+                // Badge first, then optionally enhance with SCITT
+                let badge_outcome = self.server_verifier.verify(&parsed_fqdn, server_cert).await;
+                if !badge_outcome.is_success() || headers.is_empty() {
+                    return badge_outcome;
+                }
+                // Badge succeeded and SCITT headers present — try to upgrade.
+                // If SCITT headers are present but corrupt, REJECT (no fallback
+                // to badge) — prevents MITM downgrade via header injection.
+                let scitt_cache = self.scitt_verification_cache.as_deref();
+                let scitt_outcome = Self::try_scitt_verification(
+                    server_cert,
+                    headers,
+                    key_store,
+                    config,
+                    true,
+                    scitt_cache,
+                )
+                .await;
+                match scitt_outcome {
+                    Some(VerificationOutcome::ScittVerified {
+                        status_token,
+                        tier,
+                        matched_fingerprint,
+                        badge: _,
+                    }) => {
+                        // Carry the badge from badge_outcome into ScittVerified
+                        let badge = badge_outcome.badge().cloned();
+                        VerificationOutcome::ScittVerified {
+                            status_token,
+                            tier,
+                            matched_fingerprint,
+                            badge,
+                        }
+                    }
+                    // Any SCITT failure when headers are present = hard reject.
+                    // Present-but-corrupt headers must never fall back to badge.
+                    Some(outcome) => outcome,
+                    // None = no status token in headers (shouldn't happen since
+                    // we checked !headers.is_empty() above, but defensively
+                    // return the badge outcome).
+                    None => badge_outcome,
+                }
+            }
+        }
+    }
+
+    /// Verify an mTLS client with SCITT artifacts from HTTP headers.
+    ///
+    /// Same SCITT-first flow as server verification, but matches against
+    /// identity certificate fingerprints instead of server certificates.
+    #[cfg(feature = "scitt")]
+    pub async fn verify_client_with_scitt(
+        &self,
+        client_cert: &CertIdentity,
+        headers: &crate::scitt::ScittHeaders,
+    ) -> VerificationOutcome {
+        let Some(config) = &self.scitt_config else {
+            return self.client_verifier.verify(client_cert).await;
+        };
+
+        let Some(key_store) = &self.scitt_key_store else {
+            // Defensive: builder.build() rejects this combination, but guard
+            // against direct struct construction in tests.
+            tracing::error!("BUG: scitt_config present but no key store — falling back to badge");
+            return self.client_verifier.verify(client_cert).await;
+        };
+
+        match config.tier_policy {
+            ScittTierPolicy::ScittWithBadgeFallback => {
+                self.verify_client_scitt_first(client_cert, headers, key_store, config, true)
+                    .await
+            }
+            ScittTierPolicy::RequireScitt => {
+                self.verify_client_scitt_first(client_cert, headers, key_store, config, false)
+                    .await
+            }
+            ScittTierPolicy::BadgeWithScittEnhancement => {
+                let badge_outcome = self.client_verifier.verify(client_cert).await;
+                if !badge_outcome.is_success() || headers.is_empty() {
+                    return badge_outcome;
+                }
+                // Headers present — try SCITT upgrade. Corrupt headers = reject.
+                let scitt_cache = self.scitt_verification_cache.as_deref();
+                let scitt_outcome = Self::try_scitt_verification(
+                    client_cert,
+                    headers,
+                    key_store,
+                    config,
+                    false,
+                    scitt_cache,
+                )
+                .await;
+                match scitt_outcome {
+                    Some(VerificationOutcome::ScittVerified {
+                        status_token,
+                        tier,
+                        matched_fingerprint,
+                        badge: _,
+                    }) => {
+                        let badge = badge_outcome.badge().cloned();
+                        VerificationOutcome::ScittVerified {
+                            status_token,
+                            tier,
+                            matched_fingerprint,
+                            badge,
+                        }
+                    }
+                    Some(outcome) => outcome, // present-but-corrupt = reject
+                    None => badge_outcome,
+                }
+            }
+        }
+    }
+
+    /// SCITT-first verification: try SCITT, optionally fall back to badge
+    /// **only when headers are completely absent**.
+    ///
+    /// When headers are present, the SCITT result is final — no badge
+    /// fallback for any error, including `TokenExpired`. This prevents
+    /// MITM downgrade via header injection/corruption.
+    #[cfg(feature = "scitt")]
+    async fn verify_scitt_first(
+        &self,
+        fqdn: &Fqdn,
+        server_cert: &CertIdentity,
+        headers: &crate::scitt::ScittHeaders,
+        key_store: &Arc<crate::scitt::RefreshableKeyStore>,
+        config: &ScittConfig,
+        allow_badge_fallback: bool,
+    ) -> VerificationOutcome {
+        // If no SCITT headers at all, the peer doesn't support SCITT
+        if headers.is_empty() {
+            if allow_badge_fallback {
+                tracing::debug!(fqdn = %fqdn, "No SCITT headers — falling back to badge");
+                return self.server_verifier.verify(fqdn, server_cert).await;
+            }
+            return VerificationOutcome::ScittError(crate::scitt::ScittError::MissingTokenField(
+                "No SCITT headers present and RequireScitt policy is active".to_string(),
+            ));
+        }
+
+        // Headers are present — SCITT result is final, no badge fallback.
+        let scitt_cache = self.scitt_verification_cache.as_deref();
+        match Self::try_scitt_verification(
+            server_cert,
+            headers,
+            key_store,
+            config,
+            true,
+            scitt_cache,
+        )
+        .await
+        {
+            Some(outcome) => outcome,
+            None => {
+                // Headers present but no status token decoded — hard reject.
+                VerificationOutcome::ScittError(crate::scitt::ScittError::MissingTokenField(
+                    "SCITT headers present but no valid status token found".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// SCITT-first client verification with optional badge fallback
+    /// **only when headers are completely absent**.
+    #[cfg(feature = "scitt")]
+    async fn verify_client_scitt_first(
+        &self,
+        client_cert: &CertIdentity,
+        headers: &crate::scitt::ScittHeaders,
+        key_store: &Arc<crate::scitt::RefreshableKeyStore>,
+        config: &ScittConfig,
+        allow_badge_fallback: bool,
+    ) -> VerificationOutcome {
+        if headers.is_empty() {
+            if allow_badge_fallback {
+                tracing::debug!("No SCITT headers on client — falling back to badge");
+                return self.client_verifier.verify(client_cert).await;
+            }
+            return VerificationOutcome::ScittError(crate::scitt::ScittError::MissingTokenField(
+                "No SCITT headers present and RequireScitt policy is active".to_string(),
+            ));
+        }
+
+        // Headers are present — SCITT result is final, no badge fallback.
+        let scitt_cache = self.scitt_verification_cache.as_deref();
+        match Self::try_scitt_verification(
+            client_cert,
+            headers,
+            key_store,
+            config,
+            false,
+            scitt_cache,
+        )
+        .await
+        {
+            Some(outcome) => outcome,
+            None => VerificationOutcome::ScittError(crate::scitt::ScittError::MissingTokenField(
+                "SCITT headers present but no valid status token found".to_string(),
+            )),
+        }
+    }
+
+    /// Attempt SCITT verification from headers. Returns `None` if no status token.
+    ///
+    /// Uses a two-layer caching strategy to avoid redundant cryptographic work:
+    /// - **Layer 2**: Full outcome cache keyed by `(cert_fp, token_hash, receipt_hash?)`.
+    ///   A hit returns immediately with zero crypto.
+    /// - **Layer 1**: Content-addressed token and receipt caches. A hit skips
+    ///   ECDSA signature verification (~1ms saved per hit).
+    ///
+    /// On [`UnknownKeyId`](crate::scitt::ScittError::UnknownKeyId), triggers
+    /// an on-demand key refresh (respects cooldown) and retries once. This
+    /// handles key rotations between periodic refresh cycles without allowing
+    /// amplification attacks from garbage `kid` values.
+    ///
+    /// Only successful verifications are cached. Errors are never stored.
+    ///
+    /// The `is_server` flag controls which cert array to match:
+    /// - `true`: matches against `valid_server_certs`
+    /// - `false`: matches against `valid_identity_certs`
+    #[cfg(feature = "scitt")]
+    #[allow(clippy::too_many_lines)] // verification + caching flow reads best as a single method
+    async fn try_scitt_verification(
+        cert: &CertIdentity,
+        headers: &crate::scitt::ScittHeaders,
+        key_store: &Arc<crate::scitt::RefreshableKeyStore>,
+        config: &ScittConfig,
+        is_server: bool,
+        cache: Option<&crate::scitt::ScittVerificationCache>,
+    ) -> Option<VerificationOutcome> {
+        let token_bytes = headers.status_token.as_ref()?;
+
+        // Compute content hashes for cache lookups (cheap: ~1μs each)
+        let token_hash = crate::scitt::hash_bytes(token_bytes);
+        let receipt_hash = headers
+            .receipt
+            .as_ref()
+            .map(|b| crate::scitt::hash_bytes(b));
+
+        // ── Layer 2: Full outcome cache ─────────────────────────────────
+        if let Some(cache) = cache
+            && let Some(outcome) = cache
+                .get_outcome(cert.fingerprint(), &token_hash, receipt_hash.as_ref())
+                .await
+        {
+            tracing::debug!("SCITT verification cache hit (Layer 2 — full outcome)");
+            return Some(VerificationOutcome::ScittVerified {
+                status_token: (*outcome.verified_token).clone(),
+                tier: outcome.tier,
+                matched_fingerprint: outcome.matched_fingerprint.clone(),
+                badge: None,
+            });
+        }
+
+        // ── Layer 1: Token verification cache ───────────────────────────
+        let verified_token = if let Some(cached_token) = match cache {
+            Some(c) => c.get_verified_token(&token_hash).await,
+            None => None,
+        } {
+            tracing::debug!("SCITT token cache hit (Layer 1 — skipping ECDSA)");
+            (*cached_token).clone()
+        } else {
+            // Full COSE signature verification
+            let snapshot = key_store.current_snapshot().await;
+            let first_result = crate::scitt::verify_status_token(
+                token_bytes,
+                &snapshot,
+                config.clock_skew_tolerance,
+            );
+
+            // On UnknownKeyId: attempt on-demand refresh (respects cooldown) and retry once
+            let vt = match first_result {
+                Err(original_err @ crate::scitt::ScittError::UnknownKeyId(_)) => {
+                    let refreshed = match key_store.refresh_if_cooldown_elapsed().await {
+                        Ok(did_refresh) => did_refresh,
+                        Err(refresh_err) => {
+                            tracing::warn!(error = %refresh_err, "On-demand key refresh failed");
+                            false
+                        }
+                    };
+
+                    if refreshed {
+                        let new_snapshot = key_store.current_snapshot().await;
+                        match crate::scitt::verify_status_token(
+                            token_bytes,
+                            &new_snapshot,
+                            config.clock_skew_tolerance,
+                        ) {
+                            Ok(vt) => vt,
+                            Err(e) => return Some(VerificationOutcome::ScittError(e)),
+                        }
+                    } else {
+                        return Some(VerificationOutcome::ScittError(original_err));
+                    }
+                }
+                Ok(vt) => vt,
+                Err(e) => return Some(VerificationOutcome::ScittError(e)),
+            };
+
+            // Store in Layer 1 token cache
+            if let Some(cache) = cache {
+                cache
+                    .insert_verified_token(token_hash, Arc::new(vt.clone()))
+                    .await;
+            }
+
+            vt
+        };
+
+        // ── Fingerprint comparison (always, cheap) ──────────────────────
+        let fingerprint_matches = if is_server {
+            crate::scitt::matches_server_cert(&verified_token.payload, cert.fingerprint())
+        } else {
+            crate::scitt::matches_identity_cert(&verified_token.payload, cert.fingerprint())
+        };
+
+        if !fingerprint_matches {
+            return Some(VerificationOutcome::ScittError(
+                crate::scitt::ScittError::MissingTokenField(format!(
+                    "Certificate fingerprint {} not found in status token's {} cert list ({} entries)",
+                    cert.fingerprint(),
+                    if is_server { "server" } else { "identity" },
+                    if is_server {
+                        verified_token.payload.valid_server_certs.len()
+                    } else {
+                        verified_token.payload.valid_identity_certs.len()
+                    }
+                )),
+            ));
+        }
+
+        // ── Receipt verification (Layer 1 cached) ──────────────────────
+        let tier = if let Some(receipt_bytes) = &headers.receipt {
+            // Safety: receipt_hash is always Some when receipt bytes are present
+            // (computed at the top of this function from the same Option).
+            let Some(rh) = receipt_hash.as_ref() else {
+                // Defensive: should be unreachable, but fall back gracefully
+                tracing::warn!("receipt_hash missing despite receipt bytes present");
+                return Some(VerificationOutcome::ScittError(
+                    crate::scitt::ScittError::MissingTokenField(
+                        "Internal error: receipt hash not computed".to_string(),
+                    ),
+                ));
+            };
+
+            if let Some(_cached_receipt) = match cache {
+                Some(c) => c.get_verified_receipt(rh).await,
+                None => None,
+            } {
+                tracing::debug!("SCITT receipt cache hit (Layer 1 — skipping Merkle)");
+                ans_types::VerificationTier::FullScitt
+            } else {
+                // Full receipt verification — needs a key store snapshot
+                let snapshot = key_store.current_snapshot().await;
+                match crate::scitt::verify_receipt(receipt_bytes, &snapshot) {
+                    Ok(receipt) => {
+                        tracing::debug!("SCITT receipt verified — FullScitt tier");
+                        if let Some(cache) = cache {
+                            cache.insert_verified_receipt(*rh, Arc::new(receipt)).await;
+                        }
+                        ans_types::VerificationTier::FullScitt
+                    }
+                    Err(e) => {
+                        if matches!(config.tier_policy, ScittTierPolicy::RequireScitt) {
+                            tracing::error!(error = %e, "Receipt verification failed under RequireScitt — rejecting");
+                            return Some(VerificationOutcome::ScittError(e));
+                        }
+                        tracing::warn!(error = %e, "Receipt verification failed — StatusTokenVerified tier");
+                        ans_types::VerificationTier::StatusTokenVerified
+                    }
+                }
+            }
+        } else {
+            ans_types::VerificationTier::StatusTokenVerified
+        };
+
+        // ── Store in Layer 2 outcome cache ──────────────────────────────
+        if let Some(cache) = cache {
+            cache
+                .insert_outcome(
+                    cert.fingerprint(),
+                    &token_hash,
+                    receipt_hash.as_ref(),
+                    crate::scitt::CachedScittOutcome {
+                        verified_token: Arc::new(verified_token.clone()),
+                        tier,
+                        matched_fingerprint: cert.fingerprint().clone(),
+                        exp: verified_token.payload.exp,
+                    },
+                )
+                .await;
+        }
+
+        Some(VerificationOutcome::ScittVerified {
+            status_token: verified_token,
+            tier,
+            matched_fingerprint: cert.fingerprint().clone(),
+            badge: None,
+        })
+    }
 }
 
 /// Builder for `AnsVerifier`.
@@ -1671,19 +2304,30 @@ pub struct AnsVerifierBuilder {
     trusted_ra_domains: Option<HashSet<String>>,
     #[cfg(feature = "rustls")]
     private_ca_pem: Option<Vec<u8>>,
+    #[cfg(feature = "scitt")]
+    scitt_config: Option<ScittConfig>,
+    #[cfg(feature = "scitt")]
+    scitt_key_store: Option<Arc<crate::scitt::RefreshableKeyStore>>,
+    #[cfg(feature = "scitt")]
+    scitt_verification_cache: Option<Arc<crate::scitt::ScittVerificationCache>>,
 }
 
 impl fmt::Debug for AnsVerifierBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AnsVerifierBuilder")
+        let builder = &mut f.debug_struct("AnsVerifierBuilder");
+        builder
             .field("dns_config", &self.dns_config)
             .field("failure_policy", &self.failure_policy)
             .field("dane_policy", &self.dane_policy)
             .field("dane_port", &self.dane_port)
             .field("has_dns_resolver", &self.dns_resolver.is_some())
             .field("has_tlog_client", &self.tlog_client.is_some())
-            .field("has_cache_config", &self.cache_config.is_some())
-            .finish_non_exhaustive()
+            .field("has_cache_config", &self.cache_config.is_some());
+        #[cfg(feature = "scitt")]
+        builder
+            .field("has_scitt_config", &self.scitt_config.is_some())
+            .field("has_scitt_key_store", &self.scitt_key_store.is_some());
+        builder.finish_non_exhaustive()
     }
 }
 
@@ -1770,6 +2414,12 @@ impl AnsVerifierBuilder {
     /// Enable caching with default configuration.
     pub fn with_caching(mut self) -> Self {
         self.cache_config = Some(CacheConfig::default());
+        #[cfg(feature = "scitt")]
+        if self.scitt_verification_cache.is_none() {
+            self.scitt_verification_cache = Some(Arc::new(
+                crate::scitt::ScittVerificationCache::with_defaults(),
+            ));
+        }
         self
     }
 
@@ -1838,8 +2488,82 @@ impl AnsVerifierBuilder {
         self
     }
 
+    /// Enable SCITT verification with the given configuration.
+    ///
+    /// When set, the `verify_server_with_scitt` and `verify_client_with_scitt`
+    /// methods become available on the resulting `AnsVerifier`.
+    #[cfg(feature = "scitt")]
+    pub fn scitt_config(mut self, config: ScittConfig) -> Self {
+        self.scitt_config = Some(config);
+        self
+    }
+
+    /// Pre-configure SCITT root keys (static, no refresh).
+    ///
+    /// Use this for tests or offline environments where root keys are known
+    /// ahead of time. The keys are wrapped in a static
+    /// [`RefreshableKeyStore`](crate::scitt::RefreshableKeyStore) with no
+    /// refresh capability.
+    ///
+    /// For production use with automatic key refresh, use
+    /// [`scitt_refreshable_key_store`](Self::scitt_refreshable_key_store).
+    #[cfg(feature = "scitt")]
+    #[allow(clippy::needless_pass_by_value)] // Arc param is intentional public API
+    pub fn scitt_key_store(mut self, key_store: Arc<crate::scitt::ScittKeyStore>) -> Self {
+        self.scitt_key_store = Some(Arc::new(crate::scitt::RefreshableKeyStore::from_static(
+            (*key_store).clone(),
+        )));
+        self
+    }
+
+    /// Configure a refreshable SCITT root key store with periodic and
+    /// on-demand refresh support.
+    ///
+    /// Use this for production environments. See
+    /// [`RefreshableKeyStore`](crate::scitt::RefreshableKeyStore) for details
+    /// on refresh behavior and anti-amplification cooldown.
+    #[cfg(feature = "scitt")]
+    pub fn scitt_refreshable_key_store(
+        mut self,
+        key_store: Arc<crate::scitt::RefreshableKeyStore>,
+    ) -> Self {
+        self.scitt_key_store = Some(key_store);
+        self
+    }
+
+    /// Configure a custom SCITT verification cache.
+    ///
+    /// Overrides the default cache created by
+    /// [`with_caching`](Self::with_caching). Use this when you need
+    /// custom cache sizing.
+    #[cfg(feature = "scitt")]
+    pub fn with_scitt_verification_cache(
+        mut self,
+        cache: crate::scitt::ScittVerificationCache,
+    ) -> Self {
+        self.scitt_verification_cache = Some(Arc::new(cache));
+        self
+    }
+
     /// Build the verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationError::Configuration`] if `scitt_config` is set
+    /// without a key store. Use [`scitt_key_store`](Self::scitt_key_store) or
+    /// [`scitt_refreshable_key_store`](Self::scitt_refreshable_key_store) to
+    /// provide one.
     pub async fn build(self) -> AnsResult<AnsVerifier> {
+        // Validate SCITT configuration: config requires a key store.
+        #[cfg(feature = "scitt")]
+        if self.scitt_config.is_some() && self.scitt_key_store.is_none() {
+            return Err(AnsError::Verification(VerificationError::Configuration(
+                "scitt_config requires a key store — call scitt_key_store() or \
+                 scitt_refreshable_key_store() on the builder"
+                    .to_string(),
+            )));
+        }
+
         // Determine DNS resolver: custom > nameservers > preset > default
         let dns_resolver: Arc<dyn DnsResolver> = if let Some(r) = self.dns_resolver {
             r
@@ -1893,6 +2617,12 @@ impl AnsVerifierBuilder {
             client_verifier,
             #[cfg(feature = "rustls")]
             private_ca_pem: self.private_ca_pem,
+            #[cfg(feature = "scitt")]
+            scitt_config: self.scitt_config,
+            #[cfg(feature = "scitt")]
+            scitt_key_store: self.scitt_key_store,
+            #[cfg(feature = "scitt")]
+            scitt_verification_cache: self.scitt_verification_cache,
         })
     }
 }
@@ -3588,5 +4318,947 @@ mod tests {
     fn test_server_verifier_debug_format() {
         let dbg = format!("{:?}", ServerVerifierBuilder::default());
         assert!(dbg.contains("ServerVerifierBuilder"));
+    }
+
+    // ── SCITT integration tests ─────────────────────────────────────────────
+
+    #[cfg(feature = "scitt")]
+    mod scitt_integration {
+        use super::*;
+        use crate::scitt::{
+            RefreshableKeyStore, ScittError, ScittHeaders, ScittKeyStore,
+            compute_sig_structure_digest, verify_status_token,
+        };
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        use p256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner as _};
+        use p256::pkcs8::EncodePublicKey as _;
+        use sha2::{Digest, Sha256};
+
+        // ── Test helpers ────────────────────────────────────────────────
+
+        fn make_key_and_store(seed: u8) -> (SigningKey, ScittKeyStore) {
+            let signing_key = SigningKey::from_slice(&[seed; 32]).unwrap();
+            let verifying_key = signing_key.verifying_key();
+            let spki_doc = verifying_key.to_public_key_der().unwrap();
+            let spki_der = spki_doc.as_bytes();
+            let digest = Sha256::digest(spki_der);
+            let kid: [u8; 4] = [digest[0], digest[1], digest[2], digest[3]];
+            let key_hash_hex = hex::encode(kid);
+            let spki_b64 = BASE64_STANDARD.encode(spki_der);
+            let key_string = format!("tl.example.com+{key_hash_hex}+{spki_b64}");
+            let store = ScittKeyStore::from_c2sp_keys(&[key_string]).unwrap();
+            (signing_key, store)
+        }
+
+        fn build_protected_bytes(signing_key: &SigningKey) -> Vec<u8> {
+            let spki_doc = signing_key.verifying_key().to_public_key_der().unwrap();
+            let spki_der = spki_doc.as_bytes();
+            let digest = Sha256::digest(spki_der);
+            let kid = vec![digest[0], digest[1], digest[2], digest[3]];
+            let pairs = vec![
+                (
+                    ciborium::Value::Integer(1.into()),
+                    ciborium::Value::Integer((-7_i64).into()),
+                ),
+                (
+                    ciborium::Value::Integer(4.into()),
+                    ciborium::Value::Bytes(kid),
+                ),
+            ];
+            let map = ciborium::Value::Map(pairs);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&map, &mut buf).unwrap();
+            buf
+        }
+
+        fn build_cbor_payload(
+            agent_id: &str,
+            status: &str,
+            iat: i64,
+            exp: i64,
+            ans_name: &str,
+            identity_certs: &[(String, String)],
+            server_certs: &[(String, String)],
+        ) -> Vec<u8> {
+            let mut pairs: Vec<(ciborium::Value, ciborium::Value)> = Vec::new();
+            pairs.push((
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Text(agent_id.to_string()),
+            ));
+            pairs.push((
+                ciborium::Value::Integer(2.into()),
+                ciborium::Value::Text(status.to_string()),
+            ));
+            pairs.push((
+                ciborium::Value::Integer(3.into()),
+                ciborium::Value::Integer(iat.into()),
+            ));
+            pairs.push((
+                ciborium::Value::Integer(4.into()),
+                ciborium::Value::Integer(exp.into()),
+            ));
+            pairs.push((
+                ciborium::Value::Integer(5.into()),
+                ciborium::Value::Text(ans_name.to_string()),
+            ));
+            let id_certs: Vec<ciborium::Value> = identity_certs
+                .iter()
+                .map(|(fp, ct)| {
+                    ciborium::Value::Map(vec![
+                        (
+                            ciborium::Value::Text("fingerprint".to_string()),
+                            ciborium::Value::Text(fp.clone()),
+                        ),
+                        (
+                            ciborium::Value::Text("cert_type".to_string()),
+                            ciborium::Value::Text(ct.clone()),
+                        ),
+                    ])
+                })
+                .collect();
+            pairs.push((
+                ciborium::Value::Integer(6.into()),
+                ciborium::Value::Array(id_certs),
+            ));
+            let srv_certs: Vec<ciborium::Value> = server_certs
+                .iter()
+                .map(|(fp, ct)| {
+                    ciborium::Value::Map(vec![
+                        (
+                            ciborium::Value::Text("fingerprint".to_string()),
+                            ciborium::Value::Text(fp.clone()),
+                        ),
+                        (
+                            ciborium::Value::Text("cert_type".to_string()),
+                            ciborium::Value::Text(ct.clone()),
+                        ),
+                    ])
+                })
+                .collect();
+            pairs.push((
+                ciborium::Value::Integer(7.into()),
+                ciborium::Value::Array(srv_certs),
+            ));
+            pairs.push((
+                ciborium::Value::Integer(8.into()),
+                ciborium::Value::Map(vec![]),
+            ));
+            let map = ciborium::Value::Map(pairs);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&map, &mut buf).unwrap();
+            buf
+        }
+
+        fn make_token(signing_key: &SigningKey, payload: &[u8]) -> Vec<u8> {
+            let protected_bytes = build_protected_bytes(signing_key);
+            let digest = compute_sig_structure_digest(&protected_bytes, payload).unwrap();
+            let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
+            let sig_bytes = sig.to_bytes().to_vec();
+            let array = ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(protected_bytes),
+                ciborium::Value::Map(vec![]),
+                ciborium::Value::Bytes(payload.to_vec()),
+                ciborium::Value::Bytes(sig_bytes),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&array, &mut buf).unwrap();
+            buf
+        }
+
+        fn future_exp() -> i64 {
+            4_102_444_800 // 2100-01-01 00:00:00 UTC
+        }
+
+        fn past_exp() -> i64 {
+            946_684_800 // 2000-01-01 00:00:00 UTC
+        }
+
+        fn nil_uuid() -> String {
+            "00000000-0000-0000-0000-000000000000".to_string()
+        }
+
+        fn test_fp() -> String {
+            format!("SHA256:{}", "00".repeat(32))
+        }
+
+        fn test_fp2() -> String {
+            format!("SHA256:{}", "11".repeat(32))
+        }
+
+        fn make_verifier_with_scitt(
+            host: &str,
+            badge_fingerprint: &str,
+            key_store: Arc<ScittKeyStore>,
+            tier_policy: ScittTierPolicy,
+        ) -> AnsVerifier {
+            let identity_fp = format!("SHA256:{}", "22".repeat(32));
+            let badge = create_test_badge(host, "v1.0.0", badge_fingerprint, &identity_fp);
+            let badge_url = "https://tlog.example.com/v1/agents/test-id";
+            let dns_record = BadgeRecord {
+                format_version: "ans-badge1".to_string(),
+                version: Some(Version::new(1, 0, 0)),
+                url: badge_url.to_string(),
+            };
+            let dns_resolver =
+                Arc::new(MockDnsResolver::new().with_records(host, vec![dns_record]));
+            let tlog_client =
+                Arc::new(MockTransparencyLogClient::new().with_badge(badge_url, badge));
+
+            let server_verifier = ServerVerifier {
+                dns_resolver: dns_resolver.clone(),
+                tlog_client: tlog_client.clone(),
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                dane_policy: DanePolicy::Disabled,
+                dane_port: 443,
+                trusted_ra_domains: None,
+            };
+            let client_verifier = ClientVerifier {
+                dns_resolver,
+                tlog_client,
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                trusted_ra_domains: None,
+            };
+
+            AnsVerifier {
+                server_verifier,
+                client_verifier,
+                #[cfg(feature = "rustls")]
+                private_ca_pem: None,
+                scitt_config: Some(ScittConfig::new().with_tier_policy(tier_policy)),
+                scitt_key_store: Some(Arc::new(RefreshableKeyStore::from_static(
+                    (*key_store).clone(),
+                ))),
+                scitt_verification_cache: None,
+            }
+        }
+
+        fn make_valid_token(signing_key: &SigningKey, server_fp: &str) -> Vec<u8> {
+            let payload = build_cbor_payload(
+                &nil_uuid(),
+                "ACTIVE",
+                0,
+                future_exp(),
+                "ans://v1.0.0.agent.example.com",
+                &[],
+                &[(server_fp.to_string(), "X509-DV-SERVER".to_string())],
+            );
+            make_token(signing_key, &payload)
+        }
+
+        fn make_valid_identity_token(signing_key: &SigningKey, identity_fp: &str) -> Vec<u8> {
+            let payload = build_cbor_payload(
+                &nil_uuid(),
+                "ACTIVE",
+                0,
+                future_exp(),
+                "ans://v1.0.0.agent.example.com",
+                &[(identity_fp.to_string(), "X509-OV-CLIENT".to_string())],
+                &[],
+            );
+            make_token(signing_key, &payload)
+        }
+
+        // ── ScittConfig / ScittTierPolicy tests ─────────────────────────
+
+        #[test]
+        fn scitt_config_default() {
+            let config = ScittConfig::default();
+            assert!(matches!(
+                config.tier_policy,
+                ScittTierPolicy::ScittWithBadgeFallback
+            ));
+            assert_eq!(config.clock_skew_tolerance, Duration::from_secs(60));
+        }
+
+        #[test]
+        fn scitt_config_builder_chain() {
+            let config = ScittConfig::new()
+                .with_tier_policy(ScittTierPolicy::RequireScitt)
+                .with_clock_skew(Duration::from_secs(120));
+            assert!(matches!(config.tier_policy, ScittTierPolicy::RequireScitt));
+            assert_eq!(config.clock_skew_tolerance, Duration::from_secs(120));
+        }
+
+        // ── VerificationOutcome SCITT variants ──────────────────────────
+
+        #[test]
+        fn scitt_verified_is_success() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::FullScitt,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: None,
+            };
+            assert!(outcome.is_success());
+            assert!(!outcome.is_not_ans_agent());
+        }
+
+        #[test]
+        fn scitt_verified_badge_accessor_with_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+
+            let badge = create_test_badge("agent.example.com", "v1.0.0", &test_fp(), "SHA256:aaa");
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::FullScitt,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: Some(badge),
+            };
+            assert!(outcome.badge().is_some());
+        }
+
+        #[test]
+        fn scitt_verified_badge_accessor_without_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::StatusTokenVerified,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: None,
+            };
+            assert!(outcome.badge().is_none());
+        }
+
+        #[test]
+        fn scitt_error_is_not_success() {
+            let outcome = VerificationOutcome::ScittError(ScittError::SignatureInvalid);
+            assert!(!outcome.is_success());
+        }
+
+        #[test]
+        fn scitt_error_into_result() {
+            let outcome = VerificationOutcome::ScittError(ScittError::SignatureInvalid);
+            let result = outcome.into_result();
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn scitt_verified_into_scitt_result_with_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+            let badge = create_test_badge("agent.example.com", "v1.0.0", &test_fp(), "SHA256:aaa");
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::FullScitt,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: Some(badge),
+            };
+            let result = outcome.into_scitt_result();
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_some());
+        }
+
+        #[test]
+        fn scitt_verified_into_scitt_result_without_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::StatusTokenVerified,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: None,
+            };
+            // into_scitt_result is consistent with is_success(): both say "success"
+            let result = outcome.into_scitt_result();
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        }
+
+        #[test]
+        fn scitt_error_into_scitt_result() {
+            let outcome = VerificationOutcome::ScittError(ScittError::SignatureInvalid);
+            let result = outcome.into_scitt_result();
+            assert!(result.is_err());
+        }
+
+        // ── verify_server_with_scitt ────────────────────────────────────
+
+        #[tokio::test]
+        async fn scitt_server_verification_success_token_only() {
+            let fp = test_fp();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            let token_bytes = make_valid_token(&signing_key, &fp);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            assert!(outcome.is_success());
+            match outcome {
+                VerificationOutcome::ScittVerified { tier, .. } => {
+                    assert_eq!(tier, ans_types::VerificationTier::StatusTokenVerified);
+                }
+                other => panic!("Expected ScittVerified, got: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn scitt_server_no_headers_fallback_to_badge() {
+            let fp = test_fp();
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Should fall back to badge and succeed
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_no_headers_require_scitt_fails() {
+            let fp = test_fp();
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::RequireScitt,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_corrupt_token_rejects() {
+            let fp = test_fp();
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            // Valid base64 but garbage COSE
+            let bad_token_b64 = BASE64_STANDARD.encode(b"not-a-cose-structure");
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&bad_token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Present but corrupt → hard reject, NOT badge fallback
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_fingerprint_mismatch() {
+            let fp = test_fp();
+            let different_fp = test_fp2();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            // Token lists fp, but cert has different_fp
+            let token_bytes = make_valid_token(&signing_key, &fp);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &different_fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_expired_token_with_headers_rejects() {
+            let fp = test_fp();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            // Build an expired token
+            let payload = build_cbor_payload(
+                &nil_uuid(),
+                "ACTIVE",
+                0,
+                past_exp(),
+                "ans://v1.0.0.agent.example.com",
+                &[],
+                &[(fp.clone(), "X509-DV-SERVER".to_string())],
+            );
+            let token_bytes = make_token(&signing_key, &payload);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Headers present + expired token = hard reject (no badge fallback)
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_expired_token_require_scitt_fails() {
+            let fp = test_fp();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            let payload = build_cbor_payload(
+                &nil_uuid(),
+                "ACTIVE",
+                0,
+                past_exp(),
+                "ans://v1.0.0.agent.example.com",
+                &[],
+                &[(fp.clone(), "X509-DV-SERVER".to_string())],
+            );
+            let token_bytes = make_token(&signing_key, &payload);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::RequireScitt,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // RequireScitt + expired = hard fail
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_terminal_status_rejects() {
+            let fp = test_fp();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            // Token with REVOKED status
+            let payload = build_cbor_payload(
+                &nil_uuid(),
+                "REVOKED",
+                0,
+                future_exp(),
+                "ans://v1.0.0.agent.example.com",
+                &[],
+                &[(fp.clone(), "X509-DV-SERVER".to_string())],
+            );
+            let token_bytes = make_token(&signing_key, &payload);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Terminal status = hard reject even with fallback policy
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_badge_enhancement_policy() {
+            let fp = test_fp();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            let token_bytes = make_valid_token(&signing_key, &fp);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::BadgeWithScittEnhancement,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Badge succeeds, SCITT enhances → ScittVerified
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+        }
+
+        #[tokio::test]
+        async fn scitt_server_badge_enhancement_no_headers() {
+            let fp = test_fp();
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                store,
+                ScittTierPolicy::BadgeWithScittEnhancement,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // No SCITT headers → badge result only
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+        }
+
+        // ── verify_client_with_scitt ────────────────────────────────────
+
+        #[tokio::test]
+        async fn scitt_client_no_headers_fallback_to_badge() {
+            let identity_fp = test_fp2(); // identity cert fingerprint
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &test_fp(), // server cert fp in badge
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            // Client cert with URI SAN for mTLS
+            let cert = CertIdentity {
+                common_name: Some("agent.example.com".to_string()),
+                dns_sans: vec!["agent.example.com".to_string()],
+                uri_sans: vec!["ans://v1.0.0.agent.example.com".to_string()],
+                fingerprint: CertFingerprint::parse(&identity_fp).unwrap(),
+            };
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier.verify_client_with_scitt(&cert, &headers).await;
+            // No SCITT headers → falls back to badge client verification.
+            // Client verification tries to match identity cert fingerprint against
+            // the badge's identity_cert fingerprint.
+            // Our test badge uses "SHA256:00...00" as identity_fp, so this will
+            // either match or not depending on the badge setup.
+            // The key thing is it falls back (not ScittError).
+            assert!(!matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_client_no_headers_require_scitt_fails() {
+            let identity_fp = test_fp2();
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &test_fp(),
+                store,
+                ScittTierPolicy::RequireScitt,
+            );
+            let cert = CertIdentity {
+                common_name: Some("agent.example.com".to_string()),
+                dns_sans: vec![],
+                uri_sans: vec!["ans://v1.0.0.agent.example.com".to_string()],
+                fingerprint: CertFingerprint::parse(&identity_fp).unwrap(),
+            };
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier.verify_client_with_scitt(&cert, &headers).await;
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
+
+        #[tokio::test]
+        async fn scitt_client_verification_success_with_token() {
+            let identity_fp = test_fp2();
+            let (signing_key, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+            let token_bytes = make_valid_identity_token(&signing_key, &identity_fp);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &test_fp(),
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = CertIdentity {
+                common_name: Some("agent.example.com".to_string()),
+                dns_sans: vec!["agent.example.com".to_string()],
+                uri_sans: vec!["ans://v1.0.0.agent.example.com".to_string()],
+                fingerprint: CertFingerprint::parse(&identity_fp).unwrap(),
+            };
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier.verify_client_with_scitt(&cert, &headers).await;
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittVerified { .. }));
+        }
+
+        // ── Builder extensions ──────────────────────────────────────────
+
+        #[test]
+        fn builder_scitt_config_sets_field() {
+            let builder = AnsVerifier::builder()
+                .scitt_config(ScittConfig::new().with_tier_policy(ScittTierPolicy::RequireScitt));
+            assert!(builder.scitt_config.is_some());
+            assert!(matches!(
+                builder.scitt_config.unwrap().tier_policy,
+                ScittTierPolicy::RequireScitt
+            ));
+        }
+
+        #[test]
+        fn builder_scitt_key_store_sets_field() {
+            let (_, store) = make_key_and_store(1);
+            let builder = AnsVerifier::builder().scitt_key_store(Arc::new(store));
+            assert!(builder.scitt_key_store.is_some());
+        }
+
+        #[test]
+        fn builder_debug_includes_scitt() {
+            let builder = AnsVerifier::builder().scitt_config(ScittConfig::default());
+            let dbg = format!("{builder:?}");
+            assert!(dbg.contains("has_scitt_config"));
+            assert!(dbg.contains("true"));
+        }
+
+        // ── AnsVerifier debug with SCITT ────────────────────────────────
+
+        #[test]
+        fn verifier_debug_includes_scitt() {
+            let fp = test_fp();
+            let (_, store) = make_key_and_store(1);
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                Arc::new(store),
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let dbg = format!("{verifier:?}");
+            assert!(dbg.contains("has_scitt_config"));
+        }
+
+        // ── No key store graceful fallback ──────────────────────────────
+
+        #[tokio::test]
+        async fn scitt_no_key_store_falls_back_to_badge() {
+            let fp = test_fp();
+            let host = "agent.example.com";
+            let badge = create_test_badge(host, "v1.0.0", &fp, "SHA256:aaa");
+            let badge_url = "https://tlog.example.com/v1/agents/test-id";
+            let dns_record = BadgeRecord {
+                format_version: "ans-badge1".to_string(),
+                version: Some(Version::new(1, 0, 0)),
+                url: badge_url.to_string(),
+            };
+            let dns_resolver =
+                Arc::new(MockDnsResolver::new().with_records(host, vec![dns_record]));
+            let tlog_client =
+                Arc::new(MockTransparencyLogClient::new().with_badge(badge_url, badge));
+
+            let server_verifier = ServerVerifier {
+                dns_resolver: dns_resolver.clone(),
+                tlog_client: tlog_client.clone(),
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                dane_policy: DanePolicy::Disabled,
+                dane_port: 443,
+                trusted_ra_domains: None,
+            };
+            let client_verifier = ClientVerifier {
+                dns_resolver,
+                tlog_client,
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                trusted_ra_domains: None,
+            };
+
+            // Config present, but NO key store
+            let verifier = AnsVerifier {
+                server_verifier,
+                client_verifier,
+                #[cfg(feature = "rustls")]
+                private_ca_pem: None,
+                scitt_config: Some(ScittConfig::default()),
+                scitt_key_store: None,
+                scitt_verification_cache: None,
+            };
+
+            let cert = create_test_cert_identity(host, &fp);
+            let headers = ScittHeaders::from_base64(None, Some("aGVsbG8=")).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt(host, &cert, &headers)
+                .await;
+            // No key store → graceful badge fallback
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+        }
+
+        // ── No SCITT config passes through to badge ─────────────────────
+
+        #[tokio::test]
+        async fn scitt_no_config_passes_through() {
+            let fp = test_fp();
+            let host = "agent.example.com";
+            let badge = create_test_badge(host, "v1.0.0", &fp, "SHA256:aaa");
+            let badge_url = "https://tlog.example.com/v1/agents/test-id";
+            let dns_record = BadgeRecord {
+                format_version: "ans-badge1".to_string(),
+                version: Some(Version::new(1, 0, 0)),
+                url: badge_url.to_string(),
+            };
+            let dns_resolver =
+                Arc::new(MockDnsResolver::new().with_records(host, vec![dns_record]));
+            let tlog_client =
+                Arc::new(MockTransparencyLogClient::new().with_badge(badge_url, badge));
+
+            let server_verifier = ServerVerifier {
+                dns_resolver: dns_resolver.clone(),
+                tlog_client: tlog_client.clone(),
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                dane_policy: DanePolicy::Disabled,
+                dane_port: 443,
+                trusted_ra_domains: None,
+            };
+            let client_verifier = ClientVerifier {
+                dns_resolver,
+                tlog_client,
+                cache: None,
+                failure_policy: FailurePolicy::FailClosed,
+                trusted_ra_domains: None,
+            };
+
+            let verifier = AnsVerifier {
+                server_verifier,
+                client_verifier,
+                #[cfg(feature = "rustls")]
+                private_ca_pem: None,
+                scitt_config: None,
+                scitt_key_store: None,
+                scitt_verification_cache: None,
+            };
+
+            let cert = create_test_cert_identity(host, &fp);
+            let headers = ScittHeaders::from_base64(None, Some("aGVsbG8=")).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt(host, &cert, &headers)
+                .await;
+            // No SCITT config → pass-through to badge
+            assert!(outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::Verified { .. }));
+        }
+
+        // ── Invalid FQDN ────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn scitt_server_invalid_fqdn() {
+            let (_, store) = make_key_and_store(1);
+            let store = Arc::new(store);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &test_fp(),
+                store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &test_fp());
+            let headers = ScittHeaders::new(None, None);
+
+            let outcome = verifier.verify_server_with_scitt("", &cert, &headers).await;
+            assert!(matches!(outcome, VerificationOutcome::ParseError(_)));
+        }
+
+        // ── Wrong key rejects ───────────────────────────────────────────
+
+        #[tokio::test]
+        async fn scitt_server_wrong_key_rejects() {
+            let fp = test_fp();
+            let (signing_key, _store) = make_key_and_store(1);
+            let (_, wrong_store) = make_key_and_store(2); // Different key
+            let wrong_store = Arc::new(wrong_store);
+
+            let token_bytes = make_valid_token(&signing_key, &fp);
+            let token_b64 = BASE64_STANDARD.encode(&token_bytes);
+
+            let verifier = make_verifier_with_scitt(
+                "agent.example.com",
+                &fp,
+                wrong_store,
+                ScittTierPolicy::ScittWithBadgeFallback,
+            );
+            let cert = create_test_cert_identity("agent.example.com", &fp);
+            let headers = ScittHeaders::from_base64(None, Some(&token_b64)).unwrap();
+
+            let outcome = verifier
+                .verify_server_with_scitt("agent.example.com", &cert, &headers)
+                .await;
+            // Wrong key → crypto failure → hard reject (not fallback)
+            assert!(!outcome.is_success());
+            assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+        }
     }
 }

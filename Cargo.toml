@@ -46,6 +46,9 @@ rcgen = { version = "0.14", features = ["pem"] }
 rsa = { version = "0.9", features = ["pem"] }
 rand = "0.10"
 x509-parser = "0.18"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+ciborium = "0.2"
+base64 = "0.22"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -64,6 +67,9 @@ uuid = { version = "1.22", features = ["serde", "v4"] }
 tracing = "0.1"
 async-trait = "0.1"
 urlencoding = "2.1"
+
+# Async utilities
+tokio-util = "0.7"
 
 # Caching
 moka = { version = "0.12", features = ["future"] }
