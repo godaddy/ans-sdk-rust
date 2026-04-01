@@ -44,6 +44,9 @@ pub struct VerifiedStatusToken {
 
 /// Verify a SCITT status token: COSE signature + expiry + status check.
 ///
+/// Uses the system clock for expiry checks. See [`verify_status_token_at`]
+/// for a variant that accepts an explicit timestamp (useful in tests).
+///
 /// # Steps
 /// 1. Parse `COSE_Sign1` structure
 /// 2. Verify ECDSA P-256 signature using the key store
@@ -60,6 +63,25 @@ pub fn verify_status_token(
     token_bytes: &[u8],
     key_store: &ScittKeyStore,
     clock_skew_tolerance: std::time::Duration,
+) -> Result<VerifiedStatusToken, ScittError> {
+    verify_status_token_at(
+        token_bytes,
+        key_store,
+        clock_skew_tolerance,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+/// Verify a SCITT status token with an explicit `now` timestamp.
+///
+/// Identical to [`verify_status_token`] but accepts a caller-supplied Unix
+/// timestamp instead of reading the system clock. This makes expiry logic
+/// deterministically testable without wall-clock coupling.
+pub fn verify_status_token_at(
+    token_bytes: &[u8],
+    key_store: &ScittKeyStore,
+    clock_skew_tolerance: std::time::Duration,
+    now: i64,
 ) -> Result<VerifiedStatusToken, ScittError> {
     // Step 1: parse COSE_Sign1
     let parsed = parse_cose_sign1(token_bytes)?;
@@ -81,7 +103,6 @@ pub fn verify_status_token(
     let payload = decode_status_token_payload(&parsed.payload)?;
 
     // Step 4: check expiry
-    let now = chrono::Utc::now().timestamp();
     let capped_secs = clock_skew_tolerance
         .as_secs()
         .min(MAX_CLOCK_SKEW_TOLERANCE_SECS);
@@ -216,7 +237,13 @@ fn decode_status_token_payload(payload_bytes: &[u8]) -> Result<StatusTokenPayloa
         status.ok_or_else(|| ScittError::MissingTokenField("status (key 2)".to_string()))?,
         iat.ok_or_else(|| ScittError::MissingTokenField("iat (key 3)".to_string()))?,
         exp.ok_or_else(|| ScittError::MissingTokenField("exp (key 4)".to_string()))?,
-        ans_name.ok_or_else(|| ScittError::MissingTokenField("ans_name (key 5)".to_string()))?,
+        {
+            let raw = ans_name
+                .ok_or_else(|| ScittError::MissingTokenField("ans_name (key 5)".to_string()))?;
+            ans_types::AnsName::parse(&raw).map_err(|e| {
+                ScittError::MissingTokenField(format!("invalid ans_name (key 5): {e}"))
+            })?
+        },
         valid_identity_certs,
         valid_server_certs,
         metadata_hashes,
@@ -514,7 +541,10 @@ mod tests {
         let result =
             verify_status_token(&token, &store, std::time::Duration::from_secs(0)).unwrap();
         assert_eq!(result.payload.status, BadgeStatus::Active);
-        assert_eq!(result.payload.ans_name, "ans://v1.0.0.agent.example.com");
+        assert_eq!(
+            result.payload.ans_name,
+            ans_types::AnsName::parse("ans://v1.0.0.agent.example.com").unwrap()
+        );
     }
 
     #[test]
@@ -1004,6 +1034,92 @@ mod tests {
             &result.payload,
             &CertFingerprint::parse(&other).unwrap()
         ));
+    }
+
+    // ── verify_status_token_at (clock abstraction) ─────────────────────────────
+
+    #[test]
+    fn verify_at_deterministic_expiry_pass() {
+        let (signing_key, store) = make_key_and_store(1);
+        let payload_bytes = build_cbor_payload(
+            &nil_uuid(),
+            "ACTIVE",
+            1_000_000,
+            1_000_100, // exp = now + 100
+            "ans://v1.0.0.agent.example.com",
+            &[],
+            &[],
+            &[],
+        );
+        let token = make_token(&signing_key, &payload_bytes);
+        // "now" is before exp — should pass
+        let result =
+            verify_status_token_at(&token, &store, std::time::Duration::from_secs(0), 1_000_050)
+                .unwrap();
+        assert_eq!(result.payload.status, BadgeStatus::Active);
+    }
+
+    #[test]
+    fn verify_at_deterministic_expiry_fail() {
+        let (signing_key, store) = make_key_and_store(1);
+        let payload_bytes = build_cbor_payload(
+            &nil_uuid(),
+            "ACTIVE",
+            1_000_000,
+            1_000_100, // exp = 1_000_100
+            "ans://v1.0.0.agent.example.com",
+            &[],
+            &[],
+            &[],
+        );
+        let token = make_token(&signing_key, &payload_bytes);
+        // "now" is past exp — should fail
+        let err =
+            verify_status_token_at(&token, &store, std::time::Duration::from_secs(0), 1_000_200)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            ScittError::TokenExpired {
+                exp: 1_000_100,
+                now: 1_000_200
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_at_tolerance_boundary() {
+        let (signing_key, store) = make_key_and_store(1);
+        let payload_bytes = build_cbor_payload(
+            &nil_uuid(),
+            "ACTIVE",
+            1_000_000,
+            1_000_100, // exp = 1_000_100
+            "ans://v1.0.0.agent.example.com",
+            &[],
+            &[],
+            &[],
+        );
+        let token = make_token(&signing_key, &payload_bytes);
+        // now = exp + tolerance (exactly at boundary): now == 1_000_160, exp + tol = 1_000_160
+        // Condition is now > exp + tol, so equal means pass
+        let result = verify_status_token_at(
+            &token,
+            &store,
+            std::time::Duration::from_secs(60),
+            1_000_160,
+        )
+        .unwrap();
+        assert_eq!(result.payload.status, BadgeStatus::Active);
+
+        // now = exp + tolerance + 1 → should fail
+        let err = verify_status_token_at(
+            &token,
+            &store,
+            std::time::Duration::from_secs(60),
+            1_000_161,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ScittError::TokenExpired { .. }));
     }
 
     // ── key_id propagated correctly ───────────────────────────────────────────

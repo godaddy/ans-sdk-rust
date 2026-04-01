@@ -32,7 +32,7 @@ use super::error::ScittError;
 /// Maximum allowed hash path length (prevents denial-of-service with deeply nested proofs).
 ///
 /// A tree containing 2^63 entries would require exactly 63 hashes in the path.
-const MAX_HASH_PATH_LEN: usize = 63;
+pub const MAX_HASH_PATH_LEN: usize = 63;
 
 /// Leaf node domain separator (RFC 9162 §2.1).
 const LEAF_PREFIX: u8 = 0x00;
@@ -64,33 +64,27 @@ pub fn compute_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Verify an RFC 9162 SHA-256 Merkle inclusion proof.
+/// Walk an RFC 9162 inclusion path, returning the computed Merkle root.
 ///
-/// Confirms that `event_bytes` at position `leaf_index` is included in a
-/// transparency log tree of size `tree_size` whose root hash is `expected_root`.
+/// This is the single implementation of the path-walking algorithm, shared
+/// by [`verify_merkle_inclusion`] (which compares the root) and receipt
+/// verification (which returns the root for auditors).
 ///
-/// # Algorithm
-///
-/// Starting from the leaf hash, the algorithm walks up the tree by hashing
-/// each sibling from `hash_path` with the running hash. The side (left/right)
-/// is determined by whether the current index is odd or is the rightmost node
-/// at its level (the "boundary promotion" rule for non-power-of-2 trees).
+/// Starting from the leaf hash, walks up the tree by hashing each sibling
+/// from `hash_path`. The side (left/right) is determined by whether the
+/// current index is odd or is the rightmost node at its level (the
+/// "boundary promotion" rule for non-power-of-2 trees, RFC 9162 §2.1.3).
 ///
 /// # Errors
 ///
-/// - [`ScittError::InvalidMerkleProof`] if inputs are structurally invalid
-///   (e.g., `tree_size == 0`, `leaf_index >= tree_size`, `hash_path` too long).
-/// - [`ScittError::MerkleRootMismatch`] if the computed root does not match
-///   `expected_root` (constant-time comparison via `subtle`).
-pub fn verify_merkle_inclusion(
+/// [`ScittError::InvalidMerkleProof`] if inputs are structurally invalid
+/// (e.g., `tree_size == 0`, `leaf_index >= tree_size`, `hash_path` too long).
+pub fn walk_inclusion_path(
     event_bytes: &[u8],
     leaf_index: u64,
     tree_size: u64,
     hash_path: &[[u8; 32]],
-    expected_root: &[u8; 32],
-) -> Result<(), ScittError> {
-    // ── Input validation ──────────────────────────────────────────────────────
-
+) -> Result<[u8; 32], ScittError> {
     if tree_size == 0 {
         return Err(ScittError::InvalidMerkleProof(
             "tree_size must be >= 1".to_string(),
@@ -110,18 +104,11 @@ pub fn verify_merkle_inclusion(
         )));
     }
 
-    // ── Inclusion proof computation ───────────────────────────────────────────
-
     let mut current = compute_leaf_hash(event_bytes);
     let mut index = leaf_index;
     let mut remaining = tree_size - 1;
 
     for sibling in hash_path {
-        // When index is odd the sibling is to the left.
-        // When index equals `remaining` (rightmost node at this level) there is
-        // no right sibling, so the node is promoted by hashing with itself on
-        // the left — equivalently the sibling is always treated as the left
-        // child in this case (RFC 9162 §2.1.3).
         if index % 2 == 1 || index == remaining {
             current = compute_node_hash(sibling, &current);
         } else {
@@ -131,9 +118,30 @@ pub fn verify_merkle_inclusion(
         remaining /= 2;
     }
 
-    // ── Constant-time root comparison ─────────────────────────────────────────
+    Ok(current)
+}
 
-    if bool::from(current.ct_eq(expected_root)) {
+/// Verify an RFC 9162 SHA-256 Merkle inclusion proof.
+///
+/// Confirms that `event_bytes` at position `leaf_index` is included in a
+/// transparency log tree of size `tree_size` whose root hash is `expected_root`.
+///
+/// # Errors
+///
+/// - [`ScittError::InvalidMerkleProof`] if inputs are structurally invalid
+///   (e.g., `tree_size == 0`, `leaf_index >= tree_size`, `hash_path` too long).
+/// - [`ScittError::MerkleRootMismatch`] if the computed root does not match
+///   `expected_root` (constant-time comparison via `subtle`).
+pub fn verify_merkle_inclusion(
+    event_bytes: &[u8],
+    leaf_index: u64,
+    tree_size: u64,
+    hash_path: &[[u8; 32]],
+    expected_root: &[u8; 32],
+) -> Result<(), ScittError> {
+    let computed = walk_inclusion_path(event_bytes, leaf_index, tree_size, hash_path)?;
+
+    if bool::from(computed.ct_eq(expected_root)) {
         Ok(())
     } else {
         Err(ScittError::MerkleRootMismatch)

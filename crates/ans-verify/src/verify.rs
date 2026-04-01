@@ -309,7 +309,18 @@ impl VerificationOutcome {
         }
     }
 
-    /// Convert to a Result.
+    /// Convert to a `Result`, returning the [`Badge`] on success.
+    ///
+    /// For badge-based verification, this is the natural accessor. For
+    /// SCITT-verified outcomes that may not carry a badge, prefer
+    /// [`into_scitt_result`](Self::into_scitt_result) which returns
+    /// `Option<Badge>` on success.
+    ///
+    /// When the `scitt` feature is enabled:
+    /// - `ScittVerified` with a badge → `Ok(badge)`
+    /// - `ScittVerified` without a badge → `Err(Configuration)` (use
+    ///   `into_scitt_result()` instead)
+    /// - `ScittError` → `Err(Scitt(..))`
     pub fn into_result(self) -> AnsResult<Badge> {
         match self {
             Self::Verified { badge, .. } => Ok(badge),
@@ -343,20 +354,30 @@ impl VerificationOutcome {
                 VerificationError::DaneVerificationFailed(e),
             )),
             #[cfg(feature = "scitt")]
-            Self::ScittVerified { badge, .. } => {
-                // `into_result` returns `AnsResult<Badge>`. If SCITT-verified with
-                // a badge (enhancement path), return it. Pure SCITT (no badge) is
-                // still a success — callers using SCITT without badge fallback
-                // should use `is_success()` or match `ScittVerified` directly
-                // instead of calling `into_result()`.
-                badge.ok_or_else(|| {
-                    AnsError::Verification(VerificationError::Configuration(
-                        "ScittVerified without badge — use is_success() or match ScittVerified directly".to_string(),
-                    ))
-                })
-            }
+            Self::ScittVerified { badge, .. } => badge.ok_or_else(|| {
+                AnsError::Verification(VerificationError::Configuration(
+                    "ScittVerified without badge — use into_scitt_result() instead".to_string(),
+                ))
+            }),
             #[cfg(feature = "scitt")]
             Self::ScittError(e) => Err(AnsError::Scitt(e)),
+        }
+    }
+
+    /// Convert a SCITT-aware outcome to a `Result`.
+    ///
+    /// Returns `Ok(Some(badge))` for badge or SCITT+badge verification,
+    /// `Ok(None)` for pure SCITT verification without a badge, and
+    /// `Err(..)` for any failure.
+    ///
+    /// This method is consistent with [`is_success()`](Self::is_success):
+    /// every outcome where `is_success()` returns `true` maps to `Ok(..)`.
+    #[cfg(feature = "scitt")]
+    pub fn into_scitt_result(self) -> AnsResult<Option<Badge>> {
+        match self {
+            Self::Verified { badge, .. } => Ok(Some(badge)),
+            Self::ScittVerified { badge, .. } => Ok(badge),
+            other => other.into_result().map(Some),
         }
     }
 }
@@ -1843,7 +1864,9 @@ impl AnsVerifier {
         };
 
         let Some(key_store) = &self.scitt_key_store else {
-            tracing::warn!("SCITT config present but no key store — falling back to badge");
+            // Defensive: builder.build() rejects this combination, but guard
+            // against direct struct construction in tests.
+            tracing::error!("BUG: scitt_config present but no key store — falling back to badge");
             return self.server_verifier.verify(&parsed_fqdn, server_cert).await;
         };
 
@@ -1925,7 +1948,9 @@ impl AnsVerifier {
         };
 
         let Some(key_store) = &self.scitt_key_store else {
-            tracing::warn!("SCITT config present but no key store — falling back to badge");
+            // Defensive: builder.build() rejects this combination, but guard
+            // against direct struct construction in tests.
+            tracing::error!("BUG: scitt_config present but no key store — falling back to badge");
             return self.client_verifier.verify(client_cert).await;
         };
 
@@ -2226,6 +2251,10 @@ impl AnsVerifier {
                         ans_types::VerificationTier::FullScitt
                     }
                     Err(e) => {
+                        if matches!(config.tier_policy, ScittTierPolicy::RequireScitt) {
+                            tracing::error!(error = %e, "Receipt verification failed under RequireScitt — rejecting");
+                            return Some(VerificationOutcome::ScittError(e));
+                        }
                         tracing::warn!(error = %e, "Receipt verification failed — StatusTokenVerified tier");
                         ans_types::VerificationTier::StatusTokenVerified
                     }
@@ -2278,8 +2307,6 @@ pub struct AnsVerifierBuilder {
     #[cfg(feature = "scitt")]
     scitt_config: Option<ScittConfig>,
     #[cfg(feature = "scitt")]
-    scitt_client: Option<Arc<dyn crate::scitt::ScittClient>>,
-    #[cfg(feature = "scitt")]
     scitt_key_store: Option<Arc<crate::scitt::RefreshableKeyStore>>,
     #[cfg(feature = "scitt")]
     scitt_verification_cache: Option<Arc<crate::scitt::ScittVerificationCache>>,
@@ -2299,7 +2326,6 @@ impl fmt::Debug for AnsVerifierBuilder {
         #[cfg(feature = "scitt")]
         builder
             .field("has_scitt_config", &self.scitt_config.is_some())
-            .field("has_scitt_client", &self.scitt_client.is_some())
             .field("has_scitt_key_store", &self.scitt_key_store.is_some());
         builder.finish_non_exhaustive()
     }
@@ -2472,16 +2498,6 @@ impl AnsVerifierBuilder {
         self
     }
 
-    /// Set a custom SCITT client for fetching receipts, status tokens, and root keys.
-    ///
-    /// If not set, an [`HttpScittClient`](crate::HttpScittClient) is created
-    /// with default configuration.
-    #[cfg(feature = "scitt")]
-    pub fn scitt_client(mut self, client: Arc<dyn crate::scitt::ScittClient>) -> Self {
-        self.scitt_client = Some(client);
-        self
-    }
-
     /// Pre-configure SCITT root keys (static, no refresh).
     ///
     /// Use this for tests or offline environments where root keys are known
@@ -2530,7 +2546,24 @@ impl AnsVerifierBuilder {
     }
 
     /// Build the verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationError::Configuration`] if `scitt_config` is set
+    /// without a key store. Use [`scitt_key_store`](Self::scitt_key_store) or
+    /// [`scitt_refreshable_key_store`](Self::scitt_refreshable_key_store) to
+    /// provide one.
     pub async fn build(self) -> AnsResult<AnsVerifier> {
+        // Validate SCITT configuration: config requires a key store.
+        #[cfg(feature = "scitt")]
+        if self.scitt_config.is_some() && self.scitt_key_store.is_none() {
+            return Err(AnsError::Verification(VerificationError::Configuration(
+                "scitt_config requires a key store — call scitt_key_store() or \
+                 scitt_refreshable_key_store() on the builder"
+                    .to_string(),
+            )));
+        }
+
         // Determine DNS resolver: custom > nameservers > preset > default
         let dns_resolver: Arc<dyn DnsResolver> = if let Some(r) = self.dns_resolver {
             r
@@ -4610,6 +4643,51 @@ mod tests {
         fn scitt_error_into_result() {
             let outcome = VerificationOutcome::ScittError(ScittError::SignatureInvalid);
             let result = outcome.into_result();
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn scitt_verified_into_scitt_result_with_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+            let badge = create_test_badge("agent.example.com", "v1.0.0", &test_fp(), "SHA256:aaa");
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::FullScitt,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: Some(badge),
+            };
+            let result = outcome.into_scitt_result();
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_some());
+        }
+
+        #[test]
+        fn scitt_verified_into_scitt_result_without_badge() {
+            let (signing_key, store) = make_key_and_store(1);
+            let token_bytes = make_valid_token(&signing_key, &test_fp());
+            let verified =
+                verify_status_token(&token_bytes, &store, Duration::from_secs(0)).unwrap();
+
+            let outcome = VerificationOutcome::ScittVerified {
+                status_token: verified,
+                tier: ans_types::VerificationTier::StatusTokenVerified,
+                matched_fingerprint: CertFingerprint::parse(&test_fp()).unwrap(),
+                badge: None,
+            };
+            // into_scitt_result is consistent with is_success(): both say "success"
+            let result = outcome.into_scitt_result();
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        }
+
+        #[test]
+        fn scitt_error_into_scitt_result() {
+            let outcome = VerificationOutcome::ScittError(ScittError::SignatureInvalid);
+            let result = outcome.into_scitt_result();
             assert!(result.is_err());
         }
 

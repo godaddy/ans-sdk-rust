@@ -125,7 +125,7 @@ fn real_status_token_verifies_signature() {
 
     assert_eq!(verified.payload.agent_id.to_string(), AGENT_ID);
     assert_eq!(verified.payload.status, BadgeStatus::Active);
-    assert_eq!(verified.payload.ans_name, ANS_NAME);
+    assert_eq!(verified.payload.ans_name.to_string(), ANS_NAME);
 
     // Verify fingerprint matching
     let server_fp = CertFingerprint::parse(SERVER_FP).unwrap();

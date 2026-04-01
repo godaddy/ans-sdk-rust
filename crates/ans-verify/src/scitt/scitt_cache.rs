@@ -223,7 +223,7 @@ mod tests {
                 BadgeStatus::Active,
                 0,
                 exp,
-                "ans://v1.0.0.agent.example.com".to_string(),
+                ans_types::AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
                 vec![],
                 vec![ans_types::CertEntry::new(fp, "X509-DV-SERVER".to_string())],
                 BTreeMap::new(),

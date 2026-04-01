@@ -24,9 +24,11 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use super::ClockFn;
 use super::client::ScittClient;
 use super::error::ScittError;
 use super::root_keys::ScittKeyStore;
+use super::system_clock;
 
 /// Default background refresh interval: 24 hours.
 const DEFAULT_KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -53,6 +55,8 @@ struct Inner {
     client: Option<Arc<dyn ScittClient>>,
     /// Cooldown in seconds for on-demand refresh.
     on_demand_cooldown_secs: i64,
+    /// Clock function for cooldown and timestamp tracking.
+    clock: ClockFn,
     state: RwLock<KeyStoreState>,
     /// Serialises on-demand refresh attempts so that concurrent
     /// `UnknownKeyId` callers don't all bypass the cooldown check.
@@ -104,6 +108,7 @@ impl RefreshableKeyStore {
                     .as_secs()
                     .try_into()
                     .unwrap_or(i64::MAX),
+                clock: system_clock(),
                 state: RwLock::new(KeyStoreState {
                     snapshot: Arc::new(initial),
                     last_refreshed: None,
@@ -123,6 +128,7 @@ impl RefreshableKeyStore {
             inner: Arc::new(Inner {
                 client: Some(client),
                 on_demand_cooldown_secs: cooldown.as_secs().try_into().unwrap_or(i64::MAX),
+                clock: system_clock(),
                 state: RwLock::new(KeyStoreState {
                     snapshot: Arc::new(initial),
                     last_refreshed: None,
@@ -146,6 +152,7 @@ impl RefreshableKeyStore {
                     .as_secs()
                     .try_into()
                     .unwrap_or(i64::MAX),
+                clock: system_clock(),
                 state: RwLock::new(KeyStoreState {
                     snapshot: Arc::new(initial),
                     last_refreshed: None,
@@ -153,6 +160,17 @@ impl RefreshableKeyStore {
                 refresh_gate: Mutex::new(()),
             }),
         }
+    }
+
+    /// Override the clock function used for cooldown and timestamp tracking.
+    ///
+    /// Must be called before cloning the store. Defaults to [`system_clock`](super::system_clock).
+    #[allow(clippy::expect_used)] // Intentional: builder-phase invariant, Arc is unshared
+    pub fn with_clock(mut self, clock: ClockFn) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_clock must be called before cloning")
+            .clock = clock;
+        self
     }
 
     /// Get a cheap `Arc` clone of the current key snapshot.
@@ -189,7 +207,7 @@ impl RefreshableKeyStore {
             match state.last_refreshed {
                 None => true,
                 Some(ts) => {
-                    let now = chrono::Utc::now().timestamp();
+                    let now = (self.inner.clock)();
                     (now - ts) >= self.inner.on_demand_cooldown_secs
                 }
             }
@@ -226,7 +244,7 @@ impl RefreshableKeyStore {
 
         // Merge under the write lock so that a concurrent refresh cannot
         // overwrite keys added by another in-flight refresh.
-        let now = chrono::Utc::now().timestamp();
+        let now = (self.inner.clock)();
         let mut state = self.inner.state.write().await;
         let merged = state.snapshot.merge_from(&key_strings);
         state.snapshot = Arc::new(merged);

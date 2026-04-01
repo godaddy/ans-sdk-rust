@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::badge::BadgeStatus;
 use crate::fingerprint::CertFingerprint;
+use crate::types::AnsName;
 
 /// Which verification tier produced the verification result.
 ///
@@ -83,7 +84,7 @@ impl StatusTokenPayload {
         status: BadgeStatus,
         iat: i64,
         exp: i64,
-        ans_name: String,
+        ans_name: AnsName,
         valid_identity_certs: Vec<CertEntry>,
         valid_server_certs: Vec<CertEntry>,
         metadata_hashes: BTreeMap<String, String>,
@@ -122,7 +123,9 @@ pub struct StatusTokenPayload {
     /// Expiry timestamp as Unix seconds (CBOR key 4).
     pub exp: i64,
     /// Full ANS name, e.g. `"ans://v1.0.0.agent.example.com"` (CBOR key 5).
-    pub ans_name: String,
+    ///
+    /// Validated at deserialization time — always a well-formed ANS URI.
+    pub ans_name: AnsName,
     /// Valid identity certificates for mTLS verification (CBOR key 6).
     pub valid_identity_certs: Vec<CertEntry>,
     /// Valid server certificates for TLS verification (CBOR key 7).
@@ -217,7 +220,7 @@ mod tests {
             status: BadgeStatus::Active,
             iat: 1_700_000_000,
             exp: 1_700_003_600,
-            ans_name: "ans://v1.0.0.agent.example.com".to_string(),
+            ans_name: AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
             valid_identity_certs: vec![CertEntry::new(fp.clone(), "X509-OV-CLIENT".to_string())],
             valid_server_certs: vec![CertEntry::new(fp, "X509-DV-SERVER".to_string())],
             metadata_hashes: BTreeMap::from([("key".to_string(), "value".to_string())]),
@@ -243,7 +246,7 @@ mod tests {
             status: BadgeStatus::Warning,
             iat: 0,
             exp: 3600,
-            ans_name: "ans://v0.1.0.test.example.com".to_string(),
+            ans_name: AnsName::parse("ans://v0.1.0.test.example.com").unwrap(),
             valid_identity_certs: vec![],
             valid_server_certs: vec![],
             metadata_hashes: BTreeMap::new(),
@@ -270,7 +273,7 @@ mod tests {
                 status,
                 iat: 0,
                 exp: 3600,
-                ans_name: "ans://v1.0.0.test.example.com".to_string(),
+                ans_name: AnsName::parse("ans://v1.0.0.test.example.com").unwrap(),
                 valid_identity_certs: vec![],
                 valid_server_certs: vec![],
                 metadata_hashes: BTreeMap::new(),

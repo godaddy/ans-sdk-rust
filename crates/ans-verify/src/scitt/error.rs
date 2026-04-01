@@ -73,6 +73,15 @@ pub enum ScittError {
         [u8; 4],
     ),
 
+    /// Receipt `iss` claim does not match the signing key's TL domain.
+    #[error("Issuer mismatch: receipt claims iss={claimed:?} but key belongs to {key_domain:?}")]
+    IssuerMismatch {
+        /// The `iss` value from the COSE protected header.
+        claimed: String,
+        /// The TL domain from the trusted key's C2SP name.
+        key_domain: String,
+    },
+
     // ── Merkle ──
     /// Merkle inclusion proof is structurally invalid.
     #[error("Merkle proof invalid: {0}")]
@@ -421,6 +430,35 @@ mod tests {
         assert!(!ScittError::InvalidArrayLength { found: 3 }.should_fallback_to_badge());
         assert!(!ScittError::InvalidSignatureLength { actual: 32 }.should_fallback_to_badge());
         assert!(!ScittError::TokenExpired { exp: 0, now: 3600 }.should_fallback_to_badge());
+        assert!(
+            !ScittError::IssuerMismatch {
+                claimed: "evil.com".to_string(),
+                key_domain: "tl.example.com".to_string()
+            }
+            .should_fallback_to_badge()
+        );
+    }
+
+    #[test]
+    fn display_issuer_mismatch() {
+        let err = ScittError::IssuerMismatch {
+            claimed: "evil.example.com".to_string(),
+            key_domain: "tl.example.com".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("evil.example.com"));
+        assert!(msg.contains("tl.example.com"));
+    }
+
+    #[test]
+    fn issuer_mismatch_is_not_terminal() {
+        assert!(
+            !ScittError::IssuerMismatch {
+                claimed: "a.com".to_string(),
+                key_domain: "b.com".to_string()
+            }
+            .is_terminal_status()
+        );
     }
 
     #[test]

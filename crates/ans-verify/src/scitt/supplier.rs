@@ -29,12 +29,14 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::ClockFn;
 use super::client::ScittClient;
 use super::error::ScittError;
 use super::receipt::verify_receipt;
 use super::refreshable_key_store::RefreshableKeyStore;
 use super::root_keys::ScittKeyStore;
-use super::status_token::verify_status_token;
+use super::status_token::verify_status_token_at;
+use super::system_clock;
 
 /// Default clock skew tolerance for status token verification (30 seconds).
 const DEFAULT_CLOCK_SKEW: Duration = Duration::from_secs(30);
@@ -85,12 +87,19 @@ struct CachedArtifacts {
     token_exp: Option<i64>,
 }
 
+/// Default timeout for the lazy-init fetch in `current_headers`.
+const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Inner state shared via `Arc`.
 struct ScittHeaderSupplierInner {
     agent_id: Uuid,
     client: Arc<dyn ScittClient>,
     key_store: Arc<RefreshableKeyStore>,
     clock_skew: Duration,
+    /// Clock function for time-sensitive security checks.
+    clock: ClockFn,
+    /// Maximum time to wait for the initial fetch in `current_headers`.
+    init_timeout: Duration,
     artifacts: RwLock<CachedArtifacts>,
     /// Serialises the lazy-init path so that concurrent first-callers
     /// don't all fetch redundantly.
@@ -141,10 +150,26 @@ impl ScittHeaderSupplier {
                 client,
                 key_store,
                 clock_skew: DEFAULT_CLOCK_SKEW,
+                clock: system_clock(),
+                init_timeout: DEFAULT_INIT_TIMEOUT,
                 artifacts: RwLock::new(CachedArtifacts::default()),
                 init_gate: Mutex::new(()),
             }),
         }
+    }
+
+    /// Set the maximum time to wait for the initial fetch in
+    /// [`current_headers`](Self::current_headers).
+    ///
+    /// Defaults to 30 seconds. If the init fetch exceeds this timeout,
+    /// `current_headers` returns empty headers (the verifier falls back
+    /// to badge-based verification).
+    #[allow(clippy::expect_used)] // Intentional: builder-phase invariant, Arc is unshared
+    pub fn with_init_timeout(mut self, timeout: Duration) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_init_timeout must be called before cloning")
+            .init_timeout = timeout;
+        self
     }
 
     /// Create a supplier with a static key store (no refresh capability).
@@ -161,6 +186,18 @@ impl ScittHeaderSupplier {
         Self::new(agent_id, client, refreshable)
     }
 
+    /// Override the clock function used for time-sensitive security checks
+    /// (token expiry, refresh scheduling).
+    ///
+    /// Must be called before cloning the supplier. Defaults to [`system_clock`](super::system_clock).
+    #[allow(clippy::expect_used)] // Intentional: builder-phase invariant, Arc is unshared
+    pub fn with_clock(mut self, clock: ClockFn) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_clock must be called before cloning")
+            .clock = clock;
+        self
+    }
+
     /// Create a supplier with custom clock skew tolerance for token verification.
     pub fn with_clock_skew(
         agent_id: Uuid,
@@ -174,6 +211,8 @@ impl ScittHeaderSupplier {
                 client,
                 key_store,
                 clock_skew,
+                clock: system_clock(),
+                init_timeout: DEFAULT_INIT_TIMEOUT,
                 artifacts: RwLock::new(CachedArtifacts::default()),
                 init_gate: Mutex::new(()),
             }),
@@ -204,7 +243,7 @@ impl ScittHeaderSupplier {
             loop {
                 let sleep_duration = {
                     let artifacts = supplier.artifacts.read().await;
-                    compute_refresh_interval(artifacts.token_exp)
+                    compute_refresh_interval(artifacts.token_exp, &supplier.clock)
                 };
 
                 tokio::select! {
@@ -233,21 +272,33 @@ impl ScittHeaderSupplier {
         // don't all trigger redundant fetches.  Re-check artifact state
         // inside the mutex (double-checked locking) so a failed first
         // attempt doesn't permanently suppress retries.
+        //
+        // The entire init path (mutex acquisition + HTTP fetch) is wrapped
+        // in a timeout to prevent a slow/hanging TL from blocking all
+        // concurrent requests indefinitely.
         {
             let needs_init = {
                 let artifacts = self.inner.artifacts.read().await;
                 artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none()
             };
             if needs_init {
-                let _guard = self.inner.init_gate.lock().await;
-                // Re-check inside the lock — another caller may have
-                // populated the artifacts while we were waiting.
-                let still_needs_init = {
-                    let artifacts = self.inner.artifacts.read().await;
-                    artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none()
+                let timeout = self.inner.init_timeout;
+                let init_future = async {
+                    let _guard = self.inner.init_gate.lock().await;
+                    let still_needs_init = {
+                        let artifacts = self.inner.artifacts.read().await;
+                        artifacts.receipt_bytes.is_none() || artifacts.status_token_bytes.is_none()
+                    };
+                    if still_needs_init {
+                        Self::do_refresh_inner(&self.inner).await;
+                    }
                 };
-                if still_needs_init {
-                    Self::do_refresh_inner(&self.inner).await;
+                if tokio::time::timeout(timeout, init_future).await.is_err() {
+                    tracing::warn!(
+                        agent_id = %self.inner.agent_id,
+                        timeout_secs = timeout.as_secs(),
+                        "SCITT init fetch timed out — returning empty headers"
+                    );
                 }
             }
         }
@@ -262,7 +313,7 @@ impl ScittHeaderSupplier {
         // Only return token if it hasn't expired
         let status_token_base64 = match (&artifacts.status_token_bytes, artifacts.token_exp) {
             (Some(bytes), Some(exp)) => {
-                let now = chrono::Utc::now().timestamp();
+                let now = (self.inner.clock)();
                 if now < exp {
                     Some(BASE64_STANDARD.encode(bytes))
                 } else {
@@ -357,7 +408,8 @@ impl ScittHeaderSupplier {
 
         // Verify before caching
         let snapshot = inner.key_store.current_snapshot().await;
-        let verified = verify_status_token(&bytes, &snapshot, inner.clock_skew)?;
+        let verified =
+            verify_status_token_at(&bytes, &snapshot, inner.clock_skew, (inner.clock)())?;
 
         tracing::debug!(
             agent_id = %inner.agent_id,
@@ -374,12 +426,12 @@ impl ScittHeaderSupplier {
 }
 
 /// Compute the refresh interval: 50% of remaining TTL, clamped to a minimum.
-fn compute_refresh_interval(token_exp: Option<i64>) -> Duration {
+fn compute_refresh_interval(token_exp: Option<i64>, clock: &ClockFn) -> Duration {
     let Some(exp) = token_exp else {
         // No token yet — retry quickly
         return MIN_REFRESH_INTERVAL;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = clock();
     let remaining_secs = (exp - now).max(0);
     // Refresh at 50% TTL
     let half_ttl = remaining_secs / 2;
@@ -503,7 +555,7 @@ mod tests {
             BadgeStatus::Active,
             chrono::Utc::now().timestamp(),
             exp,
-            "ans://v1.0.0.agent.example.com".to_string(),
+            ans_types::AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
             vec![],
             vec![CertEntry::new(fp, "X509-DV-SERVER".to_string())],
             BTreeMap::new(),
@@ -529,7 +581,7 @@ mod tests {
             ),
             (
                 ciborium::Value::Integer(5.into()),
-                ciborium::Value::Text(payload_obj.ans_name.clone()),
+                ciborium::Value::Text(payload_obj.ans_name.to_string()),
             ),
             (
                 ciborium::Value::Integer(6.into()),
@@ -770,30 +822,37 @@ mod tests {
 
     #[test]
     fn refresh_interval_none_returns_minimum() {
-        let interval = compute_refresh_interval(None);
+        let clock = super::super::system_clock();
+        let interval = compute_refresh_interval(None, &clock);
         assert_eq!(interval, MIN_REFRESH_INTERVAL);
     }
 
     #[test]
     fn refresh_interval_far_future_returns_half_ttl() {
-        let exp = chrono::Utc::now().timestamp() + 3600; // 1 hour
-        let interval = compute_refresh_interval(Some(exp));
-        // 50% of ~3600 = ~1800, allow tolerance
-        assert!(interval.as_secs() >= 1790);
-        assert!(interval.as_secs() <= 1810);
+        // Use a fixed clock so the test is deterministic
+        let now = 1_000_000i64;
+        let clock: super::super::ClockFn = Arc::new(move || now);
+        let exp = now + 3600; // 1 hour from "now"
+        let interval = compute_refresh_interval(Some(exp), &clock);
+        // 50% of 3600 = 1800
+        assert_eq!(interval.as_secs(), 1800);
     }
 
     #[test]
     fn refresh_interval_past_returns_minimum() {
-        let exp = chrono::Utc::now().timestamp() - 100; // already expired
-        let interval = compute_refresh_interval(Some(exp));
+        let now = 1_000_000i64;
+        let clock: super::super::ClockFn = Arc::new(move || now);
+        let exp = now - 100; // already expired
+        let interval = compute_refresh_interval(Some(exp), &clock);
         assert_eq!(interval, MIN_REFRESH_INTERVAL);
     }
 
     #[test]
     fn refresh_interval_very_short_ttl_clamped_to_minimum() {
-        let exp = chrono::Utc::now().timestamp() + 5; // 5 seconds
-        let interval = compute_refresh_interval(Some(exp));
+        let now = 1_000_000i64;
+        let clock: super::super::ClockFn = Arc::new(move || now);
+        let exp = now + 5; // 5 seconds
+        let interval = compute_refresh_interval(Some(exp), &clock);
         assert_eq!(interval, MIN_REFRESH_INTERVAL);
     }
 

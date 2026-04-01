@@ -1570,3 +1570,92 @@ async fn test_s10_10_concurrent_cached_verifications() {
         handle.await.unwrap();
     }
 }
+
+// =========================================================================
+// Wave 1 regression tests — SCITT review findings
+// =========================================================================
+
+/// RequireScitt + invalid receipt → hard reject (not tier degradation).
+///
+/// Regression test for finding #2: receipt verification failure was silently
+/// degraded to StatusTokenVerified tier instead of rejecting.
+#[tokio::test]
+async fn test_require_scitt_bad_receipt_rejects() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+    let garbage_receipt = BASE64_STANDARD.encode(b"not-a-cose-structure");
+
+    let verifier = make_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::RequireScitt,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers =
+        ScittHeaders::from_base64(Some(&garbage_receipt), Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    // Under RequireScitt, a present-but-invalid receipt must hard reject
+    assert!(!outcome.is_success());
+    assert!(matches!(outcome, VerificationOutcome::ScittError(_)));
+}
+
+/// ScittWithBadgeFallback + invalid receipt → still degrades tier (existing behavior preserved).
+///
+/// Companion to the RequireScitt test above — ensures the fix only changes
+/// behavior for RequireScitt, not for lenient policies.
+#[tokio::test]
+async fn test_fallback_policy_bad_receipt_degrades_tier() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+    let garbage_receipt = BASE64_STANDARD.encode(b"not-a-cose-structure");
+
+    let verifier = make_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers =
+        ScittHeaders::from_base64(Some(&garbage_receipt), Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    // Under lenient policy, bad receipt degrades tier but still succeeds
+    assert!(outcome.is_success());
+    match outcome {
+        VerificationOutcome::ScittVerified { tier, .. } => {
+            assert_eq!(tier, VerificationTier::StatusTokenVerified);
+        }
+        other => panic!("Expected ScittVerified with degraded tier, got: {other:?}"),
+    }
+}
+
+/// Builder rejects scitt_config without key store.
+///
+/// Regression test for finding #6: scitt_config without scitt_key_store
+/// was silently accepted and fell back to badge at call time.
+#[tokio::test]
+async fn test_builder_rejects_config_without_key_store() {
+    let result = AnsVerifier::builder()
+        .scitt_config(ScittConfig::new())
+        .build()
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("key store"),
+        "Error should mention key store: {err}"
+    );
+}

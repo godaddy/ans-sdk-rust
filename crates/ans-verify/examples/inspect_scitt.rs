@@ -190,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ok("Signature valid, token verified!");
                 detail("Agent ID", &p.agent_id.to_string());
                 detail("Status", &format!("{:?}", p.status));
-                detail("ANS Name", &p.ans_name);
+                detail("ANS Name", &p.ans_name.to_string());
                 detail("Issued At", &ts(p.iat));
                 detail("Expires At", &ts(p.exp));
                 let ttl = p.exp - chrono::Utc::now().timestamp();
@@ -246,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ok("Signature valid (expiry bypassed for inspection)");
                         detail("Agent ID", &p.agent_id.to_string());
                         detail("Status", &format!("{:?}", p.status));
-                        detail("ANS Name", &p.ans_name);
+                        detail("ANS Name", &p.ans_name.to_string());
                         detail("Issued At", &ts(p.iat));
                         detail("Expired At", &ts(p.exp));
                         detail(

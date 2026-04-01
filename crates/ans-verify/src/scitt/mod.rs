@@ -28,6 +28,19 @@ mod status_token;
 mod supplier;
 mod verification_cache;
 
+use std::sync::Arc;
+
+/// A function that returns the current Unix timestamp in seconds.
+///
+/// Defaults to [`system_clock`]. Override in tests to control time-sensitive
+/// security checks (token expiry, cooldown gating) without wall-clock coupling.
+pub type ClockFn = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// Returns the system UTC clock. This is the default used by all SCITT components.
+pub fn system_clock() -> ClockFn {
+    Arc::new(|| chrono::Utc::now().timestamp())
+}
+
 pub use client::{HttpScittClient, ScittClient};
 pub use cose::{
     MAX_COSE_INPUT_SIZE, ParsedCoseSign1, ProtectedHeader, build_sig_structure,
@@ -42,6 +55,7 @@ pub use root_keys::{ScittKeyStore, TrustedKey, parse_c2sp_key};
 pub use scitt_cache::{ReceiptCache, StatusTokenCache};
 pub use status_token::{
     VerifiedStatusToken, matches_identity_cert, matches_server_cert, verify_status_token,
+    verify_status_token_at,
 };
 pub use supplier::{ScittHeaderSupplier, ScittOutgoingHeaders, ScittRefreshHandle};
 pub use verification_cache::{CachedScittOutcome, ScittVerificationCache, hash_bytes};

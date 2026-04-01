@@ -24,11 +24,8 @@ use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
 
 use super::cose::{compute_sig_structure_digest, parse_cose_sign1};
 use super::error::ScittError;
-use super::merkle::{compute_leaf_hash, compute_node_hash};
+use super::merkle::{MAX_HASH_PATH_LEN, walk_inclusion_path};
 use super::root_keys::ScittKeyStore;
-
-/// Maximum Merkle proof depth — sufficient for a tree with 2^63 entries.
-const MAX_MERKLE_DEPTH: usize = 63;
 
 /// A receipt whose COSE signature and Merkle proof have been verified.
 #[derive(Debug, Clone)]
@@ -91,6 +88,8 @@ pub fn verify_receipt(
     receipt_bytes: &[u8],
     key_store: &ScittKeyStore,
 ) -> Result<VerifiedReceipt, ScittError> {
+    tracing::debug!(bytes = receipt_bytes.len(), "Verifying SCITT receipt");
+
     // Step 1: parse COSE_Sign1
     let parsed = parse_cose_sign1(receipt_bytes)?;
 
@@ -110,19 +109,32 @@ pub fn verify_receipt(
     }
 
     // Step 3: look up signing key by kid
+    let kid_hex = hex::encode(parsed.protected.kid);
     let trusted_key = key_store.get(parsed.protected.kid)?;
+    tracing::debug!(kid = %kid_hex, key_domain = %trusted_key.name, "Key lookup succeeded");
+
+    // Step 3b: bind iss claim to signing key domain
+    if let Some(iss) = &parsed.protected.cwt_iss
+        && iss != &trusted_key.name
+    {
+        tracing::warn!(claimed_iss = %iss, key_domain = %trusted_key.name, "Issuer mismatch");
+        return Err(ScittError::IssuerMismatch {
+            claimed: iss.clone(),
+            key_domain: trusted_key.name.clone(),
+        });
+    }
 
     // Step 4: verify ECDSA P-256 signature
     let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload)?;
     let sig = Signature::from_slice(&parsed.signature).map_err(|_| {
-        // Length is already validated as 64 bytes by parse_cose_sign1;
-        // from_slice failure here means the bytes are not a valid P1363 encoding.
+        tracing::warn!(kid = %kid_hex, "ECDSA signature encoding invalid");
         ScittError::SignatureInvalid
     })?;
-    trusted_key
-        .key
-        .verify_prehash(&digest, &sig)
-        .map_err(|_| ScittError::SignatureInvalid)?;
+    trusted_key.key.verify_prehash(&digest, &sig).map_err(|_| {
+        tracing::warn!(kid = %kid_hex, "ECDSA signature verification failed");
+        ScittError::SignatureInvalid
+    })?;
+    tracing::debug!(kid = %kid_hex, "ECDSA signature verified");
 
     // Step 5: extract VDP from unprotected header (label 396)
     let vdp = extract_vdp(&parsed.unprotected)?;
@@ -138,12 +150,19 @@ pub fn verify_receipt(
     // The proof's real value is for external log monitors who compare tree heads
     // across time to verify append-only consistency. We compute and return the
     // root_hash so monitors/auditors can use it for that purpose.
-    let root_hash = compute_merkle_root(
+    let root_hash = walk_inclusion_path(
         &parsed.payload,
         vdp.leaf_index,
         vdp.tree_size,
         &vdp.inclusion_path,
     )?;
+
+    tracing::debug!(
+        tree_size = vdp.tree_size,
+        leaf_index = vdp.leaf_index,
+        path_len = vdp.inclusion_path.len(),
+        "Receipt verified: COSE signature + Merkle inclusion proof"
+    );
 
     Ok(VerifiedReceipt {
         tree_size: vdp.tree_size,
@@ -154,50 +173,6 @@ pub fn verify_receipt(
         iss: parsed.protected.cwt_iss,
         iat: parsed.protected.cwt_iat,
     })
-}
-
-/// Compute the Merkle root by walking the inclusion path without comparing.
-///
-/// Mirrors the path-walking in [`verify_merkle_inclusion`] but returns the
-/// computed root instead of comparing it. Used to populate [`VerifiedReceipt::root_hash`].
-fn compute_merkle_root(
-    event_bytes: &[u8],
-    leaf_index: u64,
-    tree_size: u64,
-    inclusion_path: &[[u8; 32]],
-) -> Result<[u8; 32], ScittError> {
-    if tree_size == 0 {
-        return Err(ScittError::InvalidMerkleProof(
-            "tree_size must be >= 1".to_string(),
-        ));
-    }
-    if leaf_index >= tree_size {
-        return Err(ScittError::InvalidMerkleProof(format!(
-            "leaf_index {leaf_index} >= tree_size {tree_size}"
-        )));
-    }
-    if inclusion_path.len() > MAX_MERKLE_DEPTH {
-        return Err(ScittError::InvalidMerkleProof(format!(
-            "inclusion_path length {} exceeds maximum of {MAX_MERKLE_DEPTH}",
-            inclusion_path.len()
-        )));
-    }
-
-    let mut current = compute_leaf_hash(event_bytes);
-    let mut index = leaf_index;
-    let mut remaining = tree_size - 1;
-
-    for sibling in inclusion_path {
-        if index % 2 == 1 || index == remaining {
-            current = compute_node_hash(sibling, &current);
-        } else {
-            current = compute_node_hash(&current, sibling);
-        }
-        index /= 2;
-        remaining /= 2;
-    }
-
-    Ok(current)
 }
 
 /// Extract the Verifiable Data Proof (VDP) from the COSE unprotected header at label 396.
@@ -267,9 +242,9 @@ fn extract_vdp(unprotected: &ciborium::Value) -> Result<Vdp, ScittError> {
                 // Cap at 63 (max Merkle tree depth for 2^63 entries) before allocation.
                 // ciborium already parsed all elements, so arr.len() is real, but
                 // we reject early to match compute_merkle_root's depth guard.
-                if arr.len() > MAX_MERKLE_DEPTH {
+                if arr.len() > MAX_HASH_PATH_LEN {
                     return Err(ScittError::InvalidMerkleProof(format!(
-                        "inclusion_path length {} exceeds maximum of {MAX_MERKLE_DEPTH}",
+                        "inclusion_path length {} exceeds maximum of {MAX_HASH_PATH_LEN}",
                         arr.len()
                     )));
                 }
@@ -931,5 +906,118 @@ mod tests {
         assert!(matches!(err, ScittError::InvalidMerkleProof(_)));
         assert!(err.to_string().contains("inclusion_path"));
         assert!(err.to_string().contains("CBOR array"));
+    }
+
+    // ── Issuer binding tests ───────────────────────────────────────────────
+
+    /// Build protected header bytes with alg=-7, kid, vds=1, and CWT claims
+    /// containing the given `iss` value.
+    fn build_protected_with_iss(signing_key: &SigningKey, iss: &str) -> Vec<u8> {
+        let spki_doc = signing_key.verifying_key().to_public_key_der().unwrap();
+        let spki_der = spki_doc.as_bytes();
+        let digest = Sha256::digest(spki_der);
+        let kid = vec![digest[0], digest[1], digest[2], digest[3]];
+
+        let cwt_claims = ciborium::Value::Map(vec![(
+            ciborium::Value::Integer(1.into()), // CWT key 1 = iss
+            ciborium::Value::Text(iss.to_string()),
+        )]);
+
+        let pairs = vec![
+            (
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Integer((-7_i64).into()),
+            ),
+            (
+                ciborium::Value::Integer(4.into()),
+                ciborium::Value::Bytes(kid),
+            ),
+            (
+                ciborium::Value::Integer(395.into()),
+                ciborium::Value::Integer(1.into()),
+            ),
+            (
+                ciborium::Value::Integer(15.into()), // label 15 = CWT claims
+                cwt_claims,
+            ),
+        ];
+        let map = ciborium::Value::Map(pairs);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&map, &mut buf).unwrap();
+        buf
+    }
+
+    /// Helper: build a signed receipt with custom protected header bytes.
+    fn make_receipt_with_protected(
+        signing_key: &SigningKey,
+        protected_bytes: &[u8],
+        leaves: &[&[u8]],
+        leaf_index: usize,
+    ) -> Vec<u8> {
+        let event = leaves[leaf_index];
+        let (_, inclusion_path) = build_tree_and_proof(leaves, leaf_index);
+        let tree_size = leaves.len() as u64;
+        let payload = event.to_vec();
+
+        let digest = compute_sig_structure_digest(protected_bytes, &payload).unwrap();
+        let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
+        let sig_bytes = sig.to_bytes().to_vec();
+
+        let vdp = build_vdp_map(tree_size, leaf_index as u64, &inclusion_path);
+        let unprotected = build_unprotected_with_vdp(vdp);
+
+        let array = ciborium::Value::Array(vec![
+            ciborium::Value::Bytes(protected_bytes.to_vec()),
+            unprotected,
+            ciborium::Value::Bytes(payload),
+            ciborium::Value::Bytes(sig_bytes),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&array, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn iss_matches_key_domain_passes() {
+        let (signing_key, store) = make_key_and_store(1);
+        // iss = "tl.example.com" matches the key's C2SP name
+        let protected = build_protected_with_iss(&signing_key, "tl.example.com");
+        let leaves: &[&[u8]] = &[b"event"];
+        let receipt = make_receipt_with_protected(&signing_key, &protected, leaves, 0);
+
+        let result = verify_receipt(&receipt, &store).unwrap();
+        assert_eq!(result.iss.as_deref(), Some("tl.example.com"));
+    }
+
+    #[test]
+    fn iss_mismatch_rejects() {
+        let (signing_key, store) = make_key_and_store(1);
+        // iss = "evil.example.com" does NOT match key's "tl.example.com"
+        let protected = build_protected_with_iss(&signing_key, "evil.example.com");
+        let leaves: &[&[u8]] = &[b"event"];
+        let receipt = make_receipt_with_protected(&signing_key, &protected, leaves, 0);
+
+        let err = verify_receipt(&receipt, &store).unwrap_err();
+        assert!(matches!(err, ScittError::IssuerMismatch { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("evil.example.com"),
+            "should show claimed iss: {msg}"
+        );
+        assert!(
+            msg.contains("tl.example.com"),
+            "should show key domain: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_iss_claim_still_passes() {
+        // When iss is absent, we don't enforce — existing behavior preserved
+        let (signing_key, store) = make_key_and_store(1);
+        let leaves: &[&[u8]] = &[b"event"];
+        let receipt = make_receipt(&signing_key, leaves, 0);
+
+        let result = verify_receipt(&receipt, &store).unwrap();
+        assert!(result.iss.is_none());
     }
 }
