@@ -225,7 +225,10 @@ mod tests {
                 exp,
                 ans_types::AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
                 vec![],
-                vec![ans_types::CertEntry::new(fp, "X509-DV-SERVER".to_string())],
+                vec![ans_types::CertEntry::new(
+                    fp,
+                    ans_types::CertType::X509DvServer,
+                )],
                 BTreeMap::new(),
             ),
             key_id: [0xDE, 0xAD, 0xBE, 0xEF],

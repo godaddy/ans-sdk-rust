@@ -265,16 +265,27 @@ impl RefreshableKeyStore {
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
+            tracing::info!(
+                interval_secs = interval.as_secs(),
+                "SCITT root key background refresh started"
+            );
+            let mut consecutive_failures: u32 = 0;
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(interval) => {
                         match store.do_refresh().await {
                             Ok(()) => {
+                                consecutive_failures = 0;
                                 let count = store.current_snapshot().await.len();
                                 tracing::debug!(key_count = count, "SCITT root keys refreshed");
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "Background SCITT key refresh failed");
+                                consecutive_failures = consecutive_failures.saturating_add(1);
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures,
+                                    "Background SCITT key refresh failed"
+                                );
                             }
                         }
                     }
@@ -307,6 +318,17 @@ impl RefreshableKeyStore {
     /// Returns the Unix timestamp of the last successful refresh, or `None`.
     pub async fn last_refreshed(&self) -> Option<i64> {
         self.inner.state.read().await.last_refreshed
+    }
+
+    /// Returns the number of seconds since the last successful refresh,
+    /// or `None` if no refresh has succeeded yet.
+    ///
+    /// Useful for staleness monitoring: operators can alert when this value
+    /// exceeds a threshold (e.g., 2× the refresh interval).
+    pub async fn last_refreshed_age_secs(&self) -> Option<i64> {
+        let last = self.inner.state.read().await.last_refreshed?;
+        let now = (self.inner.clock)();
+        Some(now - last)
     }
 }
 

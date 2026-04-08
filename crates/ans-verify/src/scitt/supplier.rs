@@ -557,7 +557,7 @@ mod tests {
             exp,
             ans_types::AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
             vec![],
-            vec![CertEntry::new(fp, "X509-DV-SERVER".to_string())],
+            vec![CertEntry::new(fp, ans_types::CertType::X509DvServer)],
             BTreeMap::new(),
         );
 

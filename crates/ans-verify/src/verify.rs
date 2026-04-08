@@ -354,11 +354,13 @@ impl VerificationOutcome {
                 VerificationError::DaneVerificationFailed(e),
             )),
             #[cfg(feature = "scitt")]
-            Self::ScittVerified { badge, .. } => badge.ok_or_else(|| {
-                AnsError::Verification(VerificationError::Configuration(
-                    "ScittVerified without badge — use into_scitt_result() instead".to_string(),
-                ))
-            }),
+            Self::ScittVerified { badge: Some(b), .. } => Ok(b),
+            #[cfg(feature = "scitt")]
+            Self::ScittVerified { badge: None, .. } => Err(AnsError::Verification(
+                VerificationError::Configuration(
+                    "SCITT verification succeeded without badge; use into_scitt_result() for SCITT-aware callers".to_string(),
+                ),
+            )),
             #[cfg(feature = "scitt")]
             Self::ScittError(e) => Err(AnsError::Scitt(e)),
         }
@@ -1063,11 +1065,18 @@ impl ServerVerifier {
                     fqdn: fqdn.to_string(),
                 },
                 // SCITT errors should not reach badge-path error handling;
-                // if they do, treat as a generic verification failure.
+                // if they do, log loudly and treat as a generic verification failure.
                 #[cfg(feature = "scitt")]
-                AnsError::Scitt(_) => VerificationOutcome::NotAnsAgent {
-                    fqdn: fqdn.to_string(),
-                },
+                AnsError::Scitt(ref e) => {
+                    tracing::error!(
+                        error = %e,
+                        fqdn = %fqdn,
+                        "BUG: ScittError reached badge-path error handler — treating as NotAnsAgent"
+                    );
+                    VerificationOutcome::NotAnsAgent {
+                        fqdn: fqdn.to_string(),
+                    }
+                }
             },
             FailurePolicy::FailOpenWithCache { max_staleness } => {
                 if let Some(cache) = &self.cache {
@@ -1089,11 +1098,18 @@ impl ServerVerifier {
                         fqdn: fqdn.to_string(),
                     },
                     // SCITT errors should not reach badge-path error handling;
-                    // if they do, treat as a generic verification failure.
+                    // if they do, log loudly and treat as a generic verification failure.
                     #[cfg(feature = "scitt")]
-                    AnsError::Scitt(_) => VerificationOutcome::NotAnsAgent {
-                        fqdn: fqdn.to_string(),
-                    },
+                    AnsError::Scitt(ref e) => {
+                        tracing::error!(
+                            error = %e,
+                            fqdn = %fqdn,
+                            "BUG: ScittError reached badge-path error handler — treating as NotAnsAgent"
+                        );
+                        VerificationOutcome::NotAnsAgent {
+                            fqdn: fqdn.to_string(),
+                        }
+                    }
                 }
             }
         }

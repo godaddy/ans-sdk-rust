@@ -17,6 +17,8 @@
 //! 3. `payload` — bstr (attached) or null (detached; not supported here)
 //! 4. `signature` — bstr, exactly 64 bytes for ES256 P1363 format
 
+use std::io::Cursor;
+
 use sha2::{Digest, Sha256};
 
 use super::error::ScittError;
@@ -41,6 +43,7 @@ pub struct ParsedCoseSign1 {
 
 /// Decoded fields from the COSE protected header.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields are populated during parsing; used by tests and for completeness
 pub struct ProtectedHeader {
     /// Algorithm: must be -7 (ES256).
     pub alg: i64,
@@ -79,9 +82,16 @@ pub fn parse_cose_sign1(bytes: &[u8]) -> Result<ParsedCoseSign1, ScittError> {
         });
     }
 
-    // Step 2: CBOR decode
-    let value: ciborium::Value =
-        ciborium::de::from_reader(bytes).map_err(|e| ScittError::CborDecodeError(e.to_string()))?;
+    // Step 2: CBOR decode — reject trailing bytes (RFC 9052 §2)
+    let mut cursor = Cursor::new(bytes);
+    let value: ciborium::Value = ciborium::de::from_reader(&mut cursor)
+        .map_err(|e| ScittError::CborDecodeError(e.to_string()))?;
+    // usize → u64 is infallible on all supported platforms (32-bit and 64-bit)
+    if cursor.position() != bytes.len() as u64 {
+        return Err(ScittError::CborDecodeError(
+            "trailing bytes after COSE_Sign1".to_string(),
+        ));
+    }
 
     // Step 3: unwrap Tag(18) or accept untagged array
     let inner = match value {
@@ -161,8 +171,14 @@ fn decode_protected_header(bytes: &[u8]) -> Result<ProtectedHeader, ScittError> 
         ));
     }
 
-    let value: ciborium::Value = ciborium::de::from_reader(bytes)
+    let mut cursor = Cursor::new(bytes);
+    let value: ciborium::Value = ciborium::de::from_reader(&mut cursor)
         .map_err(|e| ScittError::InvalidProtectedHeader(format!("CBOR decode: {e}")))?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(ScittError::InvalidProtectedHeader(
+            "trailing bytes after protected header".to_string(),
+        ));
+    }
 
     let ciborium::Value::Map(map) = value else {
         return Err(ScittError::InvalidProtectedHeader(

@@ -41,24 +41,26 @@ pub fn system_clock() -> ClockFn {
     Arc::new(|| chrono::Utc::now().timestamp())
 }
 
+// ── Public API (intended for external consumers) ─────────────────────────────
 pub use client::{HttpScittClient, ScittClient};
-pub use cose::{
-    MAX_COSE_INPUT_SIZE, ParsedCoseSign1, ProtectedHeader, build_sig_structure,
-    compute_sig_structure_digest, parse_cose_sign1,
-};
 pub use error::ScittError;
 pub use headers::ScittHeaders;
-pub use merkle::{compute_leaf_hash, verify_merkle_inclusion};
 pub use receipt::{VerifiedReceipt, verify_receipt};
 pub use refreshable_key_store::{KeyRefreshHandle, RefreshableKeyStore};
-pub use root_keys::{ScittKeyStore, TrustedKey, parse_c2sp_key};
+pub use root_keys::{ScittKeyStore, TrustedKey};
 pub use scitt_cache::{ReceiptCache, StatusTokenCache};
-pub use status_token::{
-    VerifiedStatusToken, matches_identity_cert, matches_server_cert, verify_status_token,
-    verify_status_token_at,
-};
+pub use status_token::{VerifiedStatusToken, verify_status_token};
 pub use supplier::{ScittHeaderSupplier, ScittOutgoingHeaders, ScittRefreshHandle};
-pub use verification_cache::{CachedScittOutcome, ScittVerificationCache, hash_bytes};
+pub use verification_cache::ScittVerificationCache;
 
+// ── Internal API (used by verify.rs, not re-exported from lib.rs) ────────────
+pub use status_token::{matches_identity_cert, matches_server_cert};
+pub use verification_cache::{CachedScittOutcome, hash_bytes};
+
+// ── Test-support API (internal primitives exposed for integration tests) ─────
 #[cfg(any(test, feature = "test-support"))]
 pub use client::MockScittClient;
+#[cfg(any(test, feature = "test-support"))]
+pub use cose::{ParsedCoseSign1, compute_sig_structure_digest, parse_cose_sign1};
+#[cfg(any(test, feature = "test-support"))]
+pub use status_token::verify_status_token_at;

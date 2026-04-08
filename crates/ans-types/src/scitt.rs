@@ -53,6 +53,42 @@ impl std::fmt::Display for VerificationTier {
     }
 }
 
+/// Certificate type for status token cert entries.
+///
+/// Constrains the `cert_type` field to known values, preventing typos or
+/// attacker-supplied garbage from bypassing cert-type-based verification logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum CertType {
+    /// X.509 Domain-Validated server certificate.
+    #[serde(rename = "X509-DV-SERVER")]
+    X509DvServer,
+    /// X.509 Organization-Validated client certificate (mTLS identity).
+    #[serde(rename = "X509-OV-CLIENT")]
+    X509OvClient,
+}
+
+impl std::str::FromStr for CertType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "X509-DV-SERVER" => Ok(Self::X509DvServer),
+            "X509-OV-CLIENT" => Ok(Self::X509OvClient),
+            other => Err(format!("unknown cert_type: {other}")),
+        }
+    }
+}
+
+impl std::fmt::Display for CertType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::X509DvServer => write!(f, "X509-DV-SERVER"),
+            Self::X509OvClient => write!(f, "X509-OV-CLIENT"),
+        }
+    }
+}
+
 /// One entry in a status token's certificate fingerprint array.
 ///
 /// Each status token contains arrays of valid server and identity certificates.
@@ -62,13 +98,13 @@ impl std::fmt::Display for VerificationTier {
 pub struct CertEntry {
     /// Certificate fingerprint in `SHA256:<hex>` format.
     pub fingerprint: CertFingerprint,
-    /// Certificate type (e.g., `"X509-DV-SERVER"`, `"X509-OV-CLIENT"`).
-    pub cert_type: String,
+    /// Certificate type.
+    pub cert_type: CertType,
 }
 
 impl CertEntry {
     /// Create a new certificate entry.
-    pub fn new(fingerprint: CertFingerprint, cert_type: String) -> Self {
+    pub fn new(fingerprint: CertFingerprint, cert_type: CertType) -> Self {
         Self {
             fingerprint,
             cert_type,
@@ -202,9 +238,9 @@ mod tests {
             0xc3, 0xd4, 0xe5, 0xf6, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0xa1, 0xb2, 0xc3, 0xd4,
             0xe5, 0xf6, 0xa1, 0xb2,
         ]);
-        let entry = CertEntry::new(fp.clone(), "X509-DV-SERVER".to_string());
+        let entry = CertEntry::new(fp.clone(), CertType::X509DvServer);
         assert_eq!(entry.fingerprint, fp);
-        assert_eq!(entry.cert_type, "X509-DV-SERVER");
+        assert_eq!(entry.cert_type, CertType::X509DvServer);
     }
 
     #[test]
@@ -221,8 +257,8 @@ mod tests {
             iat: 1_700_000_000,
             exp: 1_700_003_600,
             ans_name: AnsName::parse("ans://v1.0.0.agent.example.com").unwrap(),
-            valid_identity_certs: vec![CertEntry::new(fp.clone(), "X509-OV-CLIENT".to_string())],
-            valid_server_certs: vec![CertEntry::new(fp, "X509-DV-SERVER".to_string())],
+            valid_identity_certs: vec![CertEntry::new(fp.clone(), CertType::X509OvClient)],
+            valid_server_certs: vec![CertEntry::new(fp, CertType::X509DvServer)],
             metadata_hashes: BTreeMap::from([("key".to_string(), "value".to_string())]),
         };
 

@@ -25,7 +25,6 @@
 //! ```
 
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use super::error::ScittError;
 
@@ -85,6 +84,13 @@ pub fn walk_inclusion_path(
     tree_size: u64,
     hash_path: &[[u8; 32]],
 ) -> Result<[u8; 32], ScittError> {
+    tracing::debug!(
+        leaf_index,
+        tree_size,
+        path_len = hash_path.len(),
+        "Walking Merkle inclusion path"
+    );
+
     if tree_size == 0 {
         return Err(ScittError::InvalidMerkleProof(
             "tree_size must be >= 1".to_string(),
@@ -118,6 +124,32 @@ pub fn walk_inclusion_path(
         remaining /= 2;
     }
 
+    // After consuming all hashes, simulate any remaining promotions.
+    // In non-power-of-2 trees, the rightmost node at each level may be promoted
+    // without a sibling hash (RFC 9162 boundary promotion). These promotions
+    // don't require path elements but still halve index/remaining.
+    while remaining > 0 {
+        // A valid promotion: the node at `index` is the rightmost at this level.
+        if index == remaining {
+            index /= 2;
+            remaining /= 2;
+        } else {
+            // Not a promotion — there should have been a hash in the path.
+            // This means the path was truncated.
+            return Err(ScittError::InvalidMerkleProof(format!(
+                "incomplete inclusion path: remaining={remaining} after consuming {} hashes",
+                hash_path.len()
+            )));
+        }
+    }
+
+    // After all hashes and promotions, index must be 0 (root reached).
+    if index != 0 {
+        return Err(ScittError::InvalidMerkleProof(format!(
+            "incomplete inclusion path: index={index} != 0 after walk",
+        )));
+    }
+
     Ok(current)
 }
 
@@ -132,18 +164,26 @@ pub fn walk_inclusion_path(
 ///   (e.g., `tree_size == 0`, `leaf_index >= tree_size`, `hash_path` too long).
 /// - [`ScittError::MerkleRootMismatch`] if the computed root does not match
 ///   `expected_root` (constant-time comparison via `subtle`).
-pub fn verify_merkle_inclusion(
+#[cfg(test)]
+pub(crate) fn verify_merkle_inclusion(
     event_bytes: &[u8],
     leaf_index: u64,
     tree_size: u64,
     hash_path: &[[u8; 32]],
     expected_root: &[u8; 32],
 ) -> Result<(), ScittError> {
+    use subtle::ConstantTimeEq;
     let computed = walk_inclusion_path(event_bytes, leaf_index, tree_size, hash_path)?;
 
     if bool::from(computed.ct_eq(expected_root)) {
+        tracing::debug!(leaf_index, tree_size, "Merkle inclusion proof verified");
         Ok(())
     } else {
+        tracing::warn!(
+            leaf_index,
+            tree_size,
+            "Merkle root mismatch — computed root does not match expected"
+        );
         Err(ScittError::MerkleRootMismatch)
     }
 }
@@ -424,17 +464,53 @@ mod tests {
 
     #[test]
     fn error_hash_path_exactly_max_allowed() {
-        // 63 entries must NOT trigger the too-long error (only the root mismatch)
+        // 63 entries do NOT trigger the too-long error, but for tree_size=u64::MAX
+        // the path is still 1 hash short (needs 64), so it's detected as truncated.
         let path = vec![[0u8; 32]; MAX_HASH_PATH_LEN];
         let err = verify_merkle_inclusion(b"event", 0, u64::MAX, &path, &[0u8; 32]).unwrap_err();
-        // Should be MerkleRootMismatch, NOT InvalidMerkleProof
         assert!(
-            matches!(err, ScittError::MerkleRootMismatch),
-            "expected MerkleRootMismatch, got: {err:?}"
+            matches!(err, ScittError::InvalidMerkleProof(_)),
+            "expected InvalidMerkleProof for truncated path, got: {err:?}"
         );
     }
 
     // ── Tamper detection ───────────────────────────────────────────────────────
+
+    #[test]
+    fn error_truncated_path_rejected() {
+        // An attacker supplies an empty path for a multi-leaf tree.
+        // Without the remaining != 0 check, the leaf hash would be
+        // returned as the root — a critical bypass.
+        let event = b"attacker event";
+        let leaf = compute_leaf_hash(event);
+        // tree_size=1000, leaf_index=5, path=[] — truncated
+        let err = verify_merkle_inclusion(event, 5, 1000, &[], &leaf).unwrap_err();
+        assert!(
+            matches!(err, ScittError::InvalidMerkleProof(_)),
+            "expected InvalidMerkleProof for truncated path, got: {err:?}"
+        );
+        assert!(err.to_string().contains("incomplete inclusion path"));
+    }
+
+    #[test]
+    fn error_partially_truncated_path_rejected() {
+        // Provide some but not enough path elements
+        let leaves: &[&[u8]] = &[b"a", b"b", b"c", b"d"];
+        let root = root_from_leaves(leaves);
+        let (_, proof) = build_tree_and_proof(leaves, 0);
+        assert!(
+            proof.len() >= 2,
+            "need at least 2 path elements for this test"
+        );
+
+        // Supply only the first element — partial truncation
+        let truncated = &proof[..1];
+        let err = verify_merkle_inclusion(b"a", 0, 4, truncated, &root).unwrap_err();
+        assert!(
+            matches!(err, ScittError::InvalidMerkleProof(_)),
+            "expected InvalidMerkleProof for partial truncation, got: {err:?}"
+        );
+    }
 
     #[test]
     fn tamper_wrong_root_hash() {

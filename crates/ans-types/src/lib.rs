@@ -38,5 +38,5 @@ pub use badge::{
 };
 pub use error::{CryptoError, ParseError};
 pub use fingerprint::CertFingerprint;
-pub use scitt::{CertEntry, StatusTokenPayload, VerificationTier};
+pub use scitt::{CertEntry, CertType, StatusTokenPayload, VerificationTier};
 pub use types::{AnsName, Fqdn, Version};

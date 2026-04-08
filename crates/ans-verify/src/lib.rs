@@ -107,14 +107,14 @@ pub use rustls_verifier::{AnsClientCertVerifier, AnsServerCertVerifier};
 
 #[cfg(feature = "scitt")]
 pub use scitt::{
-    ClockFn, HttpScittClient, KeyRefreshHandle, MAX_COSE_INPUT_SIZE, ParsedCoseSign1,
-    ProtectedHeader, ReceiptCache, RefreshableKeyStore, ScittClient, ScittError,
-    ScittHeaderSupplier, ScittHeaders, ScittKeyStore, ScittOutgoingHeaders, ScittRefreshHandle,
-    ScittVerificationCache, StatusTokenCache, TrustedKey, VerifiedReceipt, VerifiedStatusToken,
-    build_sig_structure, compute_leaf_hash, compute_sig_structure_digest, matches_identity_cert,
-    matches_server_cert, parse_c2sp_key, parse_cose_sign1, system_clock, verify_merkle_inclusion,
-    verify_receipt, verify_status_token, verify_status_token_at,
+    ClockFn, HttpScittClient, KeyRefreshHandle, ReceiptCache, RefreshableKeyStore, ScittClient,
+    ScittError, ScittHeaderSupplier, ScittHeaders, ScittKeyStore, ScittOutgoingHeaders,
+    ScittRefreshHandle, ScittVerificationCache, StatusTokenCache, TrustedKey, VerifiedReceipt,
+    VerifiedStatusToken, system_clock, verify_receipt, verify_status_token,
 };
 
 #[cfg(all(feature = "scitt", any(test, feature = "test-support")))]
-pub use scitt::MockScittClient;
+pub use scitt::{
+    MockScittClient, ParsedCoseSign1, compute_sig_structure_digest, matches_identity_cert,
+    matches_server_cert, parse_cose_sign1, verify_status_token_at,
+};

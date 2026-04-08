@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use ans_types::{BadgeStatus, CertEntry, CertFingerprint, StatusTokenPayload};
+use ans_types::{BadgeStatus, CertEntry, CertFingerprint, CertType, StatusTokenPayload};
 use p256::ecdsa::Signature;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
 use uuid::Uuid;
@@ -83,21 +83,37 @@ pub fn verify_status_token_at(
     clock_skew_tolerance: std::time::Duration,
     now: i64,
 ) -> Result<VerifiedStatusToken, ScittError> {
+    tracing::debug!(bytes = token_bytes.len(), "Verifying SCITT status token");
+
     // Step 1: parse COSE_Sign1
     let parsed = parse_cose_sign1(token_bytes)?;
 
     // Step 2: verify ECDSA P-256 signature
     let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload)?;
+    let kid_hex = hex::encode(parsed.protected.kid);
     let sig = Signature::from_slice(&parsed.signature).map_err(|_| {
+        tracing::warn!(kid = %kid_hex, "ECDSA signature encoding invalid");
         // Length is already validated as 64 bytes by parse_cose_sign1;
         // from_slice failure here means the bytes are not a valid P1363 encoding.
         ScittError::SignatureInvalid
     })?;
     let trusted_key = key_store.get(parsed.protected.kid)?;
-    trusted_key
-        .key
-        .verify_prehash(&digest, &sig)
-        .map_err(|_| ScittError::SignatureInvalid)?;
+    tracing::debug!(kid = %kid_hex, key_domain = %trusted_key.name, "Key lookup succeeded");
+    trusted_key.key.verify_prehash(&digest, &sig).map_err(|_| {
+        tracing::warn!(kid = %kid_hex, "ECDSA signature verification failed");
+        ScittError::SignatureInvalid
+    })?;
+    tracing::debug!(kid = %kid_hex, "ECDSA signature verified");
+
+    // Step 2b: bind iss claim to signing key domain (mirrors receipt.rs)
+    if let Some(iss) = &parsed.protected.cwt_iss
+        && iss != &trusted_key.name
+    {
+        return Err(ScittError::IssuerMismatch {
+            claimed: iss.clone(),
+            key_domain: trusted_key.name.clone(),
+        });
+    }
 
     // Step 3: decode CBOR payload
     let payload = decode_status_token_payload(&parsed.payload)?;
@@ -108,6 +124,12 @@ pub fn verify_status_token_at(
         .min(MAX_CLOCK_SKEW_TOLERANCE_SECS);
     let tolerance = i64::try_from(capped_secs).unwrap_or(i64::MAX);
     if now > payload.exp.saturating_add(tolerance) {
+        tracing::warn!(
+            exp = payload.exp,
+            now,
+            tolerance_secs = capped_secs,
+            "Status token expired"
+        );
         return Err(ScittError::TokenExpired {
             exp: payload.exp,
             now,
@@ -116,8 +138,15 @@ pub fn verify_status_token_at(
 
     // Step 5: validate status
     if payload.status.should_reject() {
+        tracing::warn!(status = ?payload.status, "Status token has terminal status");
         return Err(ScittError::TerminalStatus(payload.status));
     }
+
+    tracing::debug!(
+        status = ?payload.status,
+        ans_name = %payload.ans_name,
+        "Status token verified"
+    );
 
     Ok(VerifiedStatusToken {
         payload,
@@ -288,7 +317,7 @@ fn parse_cert_entries(arr: Vec<ciborium::Value>) -> Result<Vec<CertEntry>, Scitt
         };
 
         let mut fingerprint: Option<CertFingerprint> = None;
-        let mut cert_type: Option<String> = None;
+        let mut cert_type: Option<CertType> = None;
 
         for (k, v) in m {
             // Match by integer key (production) or string key (test compat)
@@ -305,7 +334,7 @@ fn parse_cert_entries(arr: Vec<ciborium::Value>) -> Result<Vec<CertEntry>, Scitt
                         })?);
                 }
             } else if is_cert_type && let ciborium::Value::Text(t) = v {
-                cert_type = Some(t);
+                cert_type = Some(t.parse::<CertType>().map_err(ScittError::CborDecodeError)?);
             }
         }
 
