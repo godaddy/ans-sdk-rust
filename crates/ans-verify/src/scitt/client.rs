@@ -127,6 +127,9 @@ impl HttpScittClient {
     ///
     /// Handles 404, 410, 501, and other HTTP error codes uniformly.
     async fn get_bytes(&self, url: &Url, agent_id: Option<Uuid>) -> Result<Vec<u8>, ScittError> {
+        /// Maximum response body size for SCITT artifacts (2 MiB).
+        const MAX_RESPONSE_SIZE: usize = 2 * 1024 * 1024;
+
         tracing::debug!(url = %url, "Fetching SCITT artifact");
 
         let headers = self.build_headers()?;
@@ -174,6 +177,12 @@ impl HttpScittClient {
             .bytes()
             .await
             .map_err(crate::error::HttpError::from)?;
+
+        if bytes.len() > MAX_RESPONSE_SIZE {
+            return Err(ScittError::OversizedInput {
+                max_bytes: MAX_RESPONSE_SIZE,
+            });
+        }
 
         Ok(bytes.to_vec())
     }

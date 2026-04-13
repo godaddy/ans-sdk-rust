@@ -59,11 +59,21 @@ impl ScittKeyStore {
     /// Returns [`ScittError::InvalidKeyFormat`] if no valid keys could be parsed
     /// from the input.
     pub fn from_c2sp_keys(key_strings: &[String]) -> Result<Self, ScittError> {
-        let mut keys = HashMap::new();
+        let mut keys: HashMap<[u8; 4], TrustedKey> = HashMap::new();
 
         for key_string in key_strings {
             match parse_c2sp_key(key_string) {
                 Ok(trusted_key) => {
+                    if let Some(existing) = keys.get(&trusted_key.kid)
+                        && existing.name != trusted_key.name
+                    {
+                        warn!(
+                            kid = %hex::encode(trusted_key.kid),
+                            existing = %existing.name,
+                            new = %trusted_key.name,
+                            "Key ID collision detected — overwriting existing key"
+                        );
+                    }
                     keys.insert(trusted_key.kid, trusted_key);
                 }
                 Err(err) => {
@@ -117,7 +127,22 @@ impl ScittKeyStore {
         for key_string in additional_key_strings {
             match parse_c2sp_key(key_string) {
                 Ok(trusted_key) => {
-                    keys.entry(trusted_key.kid).or_insert(trusted_key);
+                    use std::collections::hash_map::Entry;
+                    match keys.entry(trusted_key.kid) {
+                        Entry::Occupied(e) => {
+                            if e.get().name != trusted_key.name {
+                                warn!(
+                                    kid = %hex::encode(trusted_key.kid),
+                                    existing = %e.get().name,
+                                    new = %trusted_key.name,
+                                    "Key ID collision detected during merge — keeping existing key"
+                                );
+                            }
+                        }
+                        Entry::Vacant(e) => {
+                            e.insert(trusted_key);
+                        }
+                    }
                 }
                 Err(err) => {
                     warn!(key = %key_string, error = %err, "Skipping invalid C2SP key during merge");

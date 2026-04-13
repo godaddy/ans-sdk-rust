@@ -97,31 +97,13 @@ fn real_status_token_verifies_signature() {
         .expect("valid base64");
     let store = key_store();
 
-    // Expiry logic is exhaustively tested by self-generated tokens in status_token.rs.
-    // Here we only validate that the real production COSE_Sign1 parses and verifies crypto.
-    // The captured token has expired (exp=2026-03-21), so we expect TokenExpired.
-    // Use a large-but-capped tolerance — if the token is beyond 24h past expiry,
-    // verify the crypto path directly via parse_cose_sign1 + manual signature check.
-    let result = verify_status_token(&bytes, &store, Duration::from_secs(24 * 60 * 60));
+    // Pin `now` to 1 minute after the token's iat (2026-03-25 14:19:32 UTC).
+    // This ensures the full verification + payload assertion path is exercised
+    // deterministically, regardless of when the test runs.
+    let pinned_now: i64 = 1_774_448_432; // iat + 60s
+    let result = verify_status_token_at(&bytes, &store, Duration::from_secs(60), pinned_now);
 
-    let verified = match result {
-        Ok(v) => v,
-        Err(ScittError::TokenExpired { .. }) => {
-            // Token has expired beyond our 24h cap — verify crypto manually.
-            let parsed = parse_cose_sign1(&bytes).expect("COSE parse should succeed");
-            let digest = compute_sig_structure_digest(&parsed.protected_bytes, &parsed.payload)
-                .expect("digest should succeed");
-            let sig = p256::ecdsa::Signature::from_slice(&parsed.signature)
-                .expect("sig decode should succeed");
-            let key = store.get(parsed.protected.kid).expect("key should exist");
-            use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
-            key.key
-                .verify_prehash(&digest, &sig)
-                .expect("signature should verify");
-            return; // crypto is valid, test passes
-        }
-        Err(e) => panic!("Unexpected error: {e:?}"),
-    };
+    let verified = result.expect("token should verify at pinned timestamp");
 
     assert_eq!(verified.payload.agent_id.to_string(), AGENT_ID);
     assert_eq!(verified.payload.status, BadgeStatus::Active);

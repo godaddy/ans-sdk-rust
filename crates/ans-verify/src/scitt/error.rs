@@ -95,8 +95,9 @@ pub enum ScittError {
     /// Status token has expired.
     ///
     /// This is NOT an integrity failure — the token was validly signed but is
-    /// simply stale. Under `ScittWithBadgeFallback`, this triggers badge fallback.
-    /// Under `RequireScitt`, this is a hard failure.
+    /// simply stale. Under all tier policies, `TokenExpired` is a hard reject
+    /// when SCITT headers are present. Badge fallback only occurs when SCITT
+    /// headers are completely absent.
     #[error("Status token expired (exp={exp}, now={now})")]
     TokenExpired {
         /// The token's expiry timestamp (Unix seconds).

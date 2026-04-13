@@ -231,13 +231,19 @@ impl ScittHeaderSupplier {
         let cancel_clone = cancel.clone();
 
         let task = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+
             // Initial fetch if needed: run if either receipt or token is missing
             let needs_fetch = {
                 let artifacts = supplier.artifacts.read().await;
                 artifacts.receipt_bytes.is_none() || artifacts.token_exp.is_none()
             };
             if needs_fetch {
-                Self::do_refresh_inner(&supplier).await;
+                if Self::do_refresh_inner(&supplier).await {
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                }
             }
 
             loop {
@@ -248,7 +254,16 @@ impl ScittHeaderSupplier {
 
                 tokio::select! {
                     () = tokio::time::sleep(sleep_duration) => {
-                        Self::do_refresh_inner(&supplier).await;
+                        if Self::do_refresh_inner(&supplier).await {
+                            consecutive_failures = 0;
+                        } else {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            tracing::warn!(
+                                agent_id = %supplier.agent_id,
+                                consecutive_failures,
+                                "SCITT supplier refresh failing consecutively"
+                            );
+                        }
                     }
                     () = cancel_clone.cancelled() => {
                         tracing::debug!(agent_id = %supplier.agent_id, "SCITT auto-refresh cancelled");
@@ -345,13 +360,17 @@ impl ScittHeaderSupplier {
     }
 
     /// Internal refresh that logs errors instead of propagating them.
-    async fn do_refresh_inner(inner: &ScittHeaderSupplierInner) {
+    ///
+    /// Returns `true` if both fetches succeeded, `false` otherwise.
+    async fn do_refresh_inner(inner: &ScittHeaderSupplierInner) -> bool {
+        let mut ok = true;
         if let Err(e) = Self::fetch_and_store_receipt_static(inner).await {
             tracing::warn!(
                 agent_id = %inner.agent_id,
                 error = %e,
                 "Failed to refresh SCITT receipt"
             );
+            ok = false;
         }
         if let Err(e) = Self::fetch_and_store_token_static(inner).await {
             tracing::warn!(
@@ -359,7 +378,9 @@ impl ScittHeaderSupplier {
                 error = %e,
                 "Failed to refresh SCITT status token"
             );
+            ok = false;
         }
+        ok
     }
 
     /// Fetch, verify, and store the receipt.

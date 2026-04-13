@@ -321,6 +321,69 @@ fn make_expired_token(signing_key: &SigningKey, server_fp: &str) -> Vec<u8> {
     sign_cose(signing_key, &payload)
 }
 
+fn build_receipt_protected_bytes(signing_key: &SigningKey) -> Vec<u8> {
+    let spki_doc = signing_key.verifying_key().to_public_key_der().unwrap();
+    let spki_der = spki_doc.as_bytes();
+    let digest = Sha256::digest(spki_der);
+    let kid = vec![digest[0], digest[1], digest[2], digest[3]];
+    let pairs = vec![
+        (
+            ciborium::Value::Integer(1.into()),
+            ciborium::Value::Integer((-7_i64).into()),
+        ),
+        (
+            ciborium::Value::Integer(4.into()),
+            ciborium::Value::Bytes(kid),
+        ),
+        // vds=1 (label 395) → RFC9162_SHA256
+        (
+            ciborium::Value::Integer(395.into()),
+            ciborium::Value::Integer(1.into()),
+        ),
+    ];
+    let map = ciborium::Value::Map(pairs);
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&map, &mut buf).unwrap();
+    buf
+}
+
+/// Build a valid receipt COSE_Sign1 with a trivial Merkle tree (tree_size=1, leaf_index=0).
+///
+/// A tree of size 1 has an empty inclusion path — the leaf hash IS the root hash.
+fn build_receipt(signing_key: &SigningKey, event_payload: &[u8]) -> Vec<u8> {
+    let protected_bytes = build_receipt_protected_bytes(signing_key);
+    let digest = compute_sig_structure_digest(&protected_bytes, event_payload).unwrap();
+    let (sig, _): (p256::ecdsa::Signature, _) = signing_key.sign_prehash(&digest).unwrap();
+    let sig_bytes = sig.to_bytes().to_vec();
+
+    // VDP at label 396: tree_size=1, leaf_index=0, empty inclusion_path
+    let vdp = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Integer((-1_i64).into()),
+            ciborium::Value::Integer(1.into()), // tree_size
+        ),
+        (
+            ciborium::Value::Integer((-2_i64).into()),
+            ciborium::Value::Integer(0.into()), // leaf_index
+        ),
+        (
+            ciborium::Value::Integer((-3_i64).into()),
+            ciborium::Value::Array(vec![]), // empty inclusion_path
+        ),
+    ]);
+    let unprotected = ciborium::Value::Map(vec![(ciborium::Value::Integer(396.into()), vdp)]);
+
+    let array = ciborium::Value::Array(vec![
+        ciborium::Value::Bytes(protected_bytes),
+        unprotected,
+        ciborium::Value::Bytes(event_payload.to_vec()),
+        ciborium::Value::Bytes(sig_bytes),
+    ]);
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&array, &mut buf).unwrap();
+    buf
+}
+
 fn encode_b64(bytes: &[u8]) -> String {
     BASE64_STANDARD.encode(bytes)
 }
@@ -1658,4 +1721,54 @@ async fn test_builder_rejects_config_without_key_store() {
         err.contains("key store"),
         "Error should mention key store: {err}"
     );
+}
+
+// =========================================================================
+// S-Full: FullScitt tier (token + receipt both valid)
+// =========================================================================
+
+/// Valid status token + valid receipt → ScittVerified with FullScitt tier.
+///
+/// This is the highest verification tier: COSE signature + Merkle inclusion proof.
+/// The receipt is built with tree_size=1, leaf_index=0 (trivial single-leaf tree).
+#[tokio::test]
+async fn test_full_scitt_tier_with_token_and_receipt() {
+    let (signing_key, store) = make_key_and_store(1);
+    let store = Arc::new(store);
+    let token = make_server_token(&signing_key, SERVER_FP);
+
+    // Build a receipt: the payload can be any bytes — the receipt just proves
+    // inclusion in the TL's Merkle tree. Use a simple event payload.
+    let event_payload = b"test-event-payload";
+    let receipt = build_receipt(&signing_key, event_payload);
+
+    let verifier = make_scitt_verifier(
+        HOST,
+        SERVER_FP,
+        IDENTITY_FP,
+        store,
+        ScittTierPolicy::ScittWithBadgeFallback,
+    )
+    .await;
+    let cert = server_cert(HOST, SERVER_FP);
+    let headers =
+        ScittHeaders::from_base64(Some(&encode_b64(&receipt)), Some(&encode_b64(&token))).unwrap();
+
+    let outcome = verifier
+        .verify_server_with_scitt(HOST, &cert, &headers)
+        .await;
+    assert!(
+        outcome.is_success(),
+        "FullScitt should succeed: {outcome:?}"
+    );
+    match outcome {
+        VerificationOutcome::ScittVerified { tier, .. } => {
+            assert_eq!(
+                tier,
+                VerificationTier::FullScitt,
+                "Expected FullScitt tier when both token and receipt are valid"
+            );
+        }
+        other => panic!("Expected ScittVerified with FullScitt tier, got: {other:?}"),
+    }
 }
