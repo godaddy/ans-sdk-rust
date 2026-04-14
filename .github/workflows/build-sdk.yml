@@ -43,7 +43,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls
+      - run: cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt
 
   test:
     name: Test
@@ -61,7 +61,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --features ans-verify/test-support,ans-verify/rustls
+      - run: cargo test --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt
 
   build:
     name: Build
@@ -97,7 +97,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-doc-
-      - run: cargo doc --workspace --no-deps --features ans-verify/rustls
+      - run: cargo doc --workspace --no-deps --features ans-verify/rustls,ans-verify/scitt
 
   msrv:
     name: MSRV (1.88)
@@ -115,7 +115,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-msrv-
-      - run: cargo check --workspace --features ans-verify/rustls
+      - run: cargo check --workspace --features ans-verify/rustls,ans-verify/scitt
 
   audit:
     name: Security Audit
@@ -160,7 +160,7 @@ jobs:
         run: |
           cargo llvm-cov \
             --workspace \
-            --features ans-verify/test-support,ans-verify/rustls \
+            --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt \
             --fail-under-lines 90 \
             | tee coverage-report.txt
       - name: Post coverage to PR

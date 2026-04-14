@@ -14,8 +14,12 @@ cargo build --workspace --release
 # Run all tests (includes test-support for mocks)
 cargo test --workspace --features ans-verify/test-support,ans-verify/rustls
 
+# Run all tests including SCITT
+cargo test --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt
+
 # Run tests for specific crate
 cargo test -p ans-verify --features test-support
+cargo test -p ans-verify --features test-support,scitt  # includes SCITT tests
 cargo test -p ans-types
 cargo test -p ans-client
 
@@ -29,15 +33,19 @@ RUST_LOG=ans_verify=debug cargo test --workspace -- --nocapture
 RUST_LOG=ans_verify=debug cargo run -p ans-verify --example verify_server
 RUST_LOG=ans_verify=debug cargo run -p ans-verify --example verify_mtls_client
 
+# Run SCITT examples
+RUST_LOG=ans_verify=debug cargo run -p ans-verify --features scitt --example verify_server_scitt
+RUST_LOG=ans_verify=debug cargo run -p ans-verify --features scitt --example verify_mtls_scitt
+
 # Check formatting and lints
 cargo fmt --all -- --check
-cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls
+cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt
 
 # Fix formatting automatically
 cargo fmt --all
 
 # Fix clippy warnings automatically
-cargo clippy --fix --workspace --features ans-verify/test-support,ans-verify/rustls --allow-dirty
+cargo clippy --fix --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt --allow-dirty
 ```
 
 ## Required Checks
@@ -45,9 +53,9 @@ cargo clippy --fix --workspace --features ans-verify/test-support,ans-verify/rus
 All changes must pass before merging:
 
 ```bash
-cargo fmt --all -- --check                                             # Formatting
-cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls            # No warnings
-cargo test --workspace --features ans-verify/test-support,ans-verify/rustls              # All tests pass
+cargo fmt --all -- --check                                                              # Formatting
+cargo clippy --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt  # No warnings
+cargo test --workspace --features ans-verify/test-support,ans-verify/rustls,ans-verify/scitt    # All tests pass
 ```
 
 ## Releasing
@@ -107,6 +115,7 @@ ans-client (depends on ans-types)
 - `TransparencyLogClient` trait + `HttpTransparencyLogClient`: Badge API client
 - `BadgeCache`: TTL-based Moka cache for badge responses
 - DANE/TLSA verification via `DanePolicy` and `TlsaRecord`
+- SCITT verification (behind `scitt` feature): `ScittConfig`, `ScittKeyStore`, `ScittHeaders`, `ScittHeaderSupplier`
 
 **`ans-client`** — ANS Registry API client for agent registration and management:
 
@@ -136,6 +145,26 @@ Client verification (`verify_client`) for mTLS:
 2. DNS lookup by FQDN, match badge to certificate version
 3. Compare identity certificate fingerprint to badge's `attestations.identity_cert.fingerprint`
 4. Compare ANS name from URI SAN to badge's `ans_name`
+
+### SCITT Verification Flow (feature = "scitt")
+
+SCITT-enhanced verification (`verify_server_with_scitt` / `verify_client_with_scitt`):
+
+1. Parse SCITT headers (`X-SCITT-Receipt`, `X-ANS-Status-Token`)
+2. If status token present: verify COSE_Sign1 signature, check expiry, validate status
+3. Match certificate fingerprint against token's cert array
+4. If receipt present: verify Merkle inclusion proof
+5. Result is `VerificationOutcome::ScittVerified` with verification tier
+
+Fallback behavior (governed by `ScittTierPolicy`):
+- `ScittWithBadgeFallback` (default): SCITT first, badge fallback only if headers absent
+- `RequireScitt`: SCITT required, no badge fallback
+- `BadgeWithScittEnhancement`: Badge first, SCITT enhances if headers present
+
+Key rules:
+- Present headers are final: any SCITT failure (including `TokenExpired`) = REJECT, no badge fallback
+- Badge fallback only when SCITT headers are completely absent
+- Terminal status (`REVOKED`/`EXPIRED`) = always reject regardless of policy
 
 ### Key Traits
 
@@ -197,3 +226,8 @@ Test fixtures use `rstest` for parameterized tests and `test-log` for tracing ou
 - **Server cert**: Public CA certificate for TLS server identity
 - **Identity cert**: ANS Private CA certificate for mTLS client authentication
 - **TLSA record**: DANE certificate binding at `_{port}._tcp.{fqdn}`
+- **SCITT**: Supply Chain Integrity, Transparency, and Trust — offline verification via receipts and status tokens
+- **Receipt**: COSE_Sign1-wrapped Merkle inclusion proof from the transparency log
+- **Status Token**: COSE_Sign1-signed current-status claim with certificate fingerprint arrays
+- **COSE_Sign1**: CBOR Object Signing (RFC 9052) — used for receipt and status token signatures
+- **C2SP key**: Key format `{issuer}+{key_id_hex}+{spki_base64}` for transparency log root keys

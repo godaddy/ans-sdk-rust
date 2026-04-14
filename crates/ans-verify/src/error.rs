@@ -26,6 +26,11 @@ pub enum AnsError {
     /// Parse error for types
     #[error("Parse error: {0}")]
     Parse(#[from] ParseError),
+
+    /// SCITT verification error
+    #[cfg(feature = "scitt")]
+    #[error("SCITT error: {0}")]
+    Scitt(#[from] crate::scitt::ScittError),
 }
 
 /// Result type alias using `AnsError`.
