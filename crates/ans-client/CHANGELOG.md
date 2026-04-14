@@ -1,5 +1,7 @@
 # Changelog
 
+## [0.1.3](https://github.com/godaddy/ans-sdk-rust/compare/ans-client-v0.1.2...ans-client-v0.1.3) (2026-04-14)
+
 ## [0.1.2](https://github.com/godaddy/ans-sdk-rust/compare/ans-client-v0.1.1...ans-client-v0.1.2) (2026-03-05)
 
 
