@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/godaddy/ans-sdk-rust/compare/ans-types-v0.1.2...ans-types-v0.1.3) (2026-04-14)
+
+
+### Features
+
+* add SCITT verification for offline-capable trust verification ([#29](https://github.com/godaddy/ans-sdk-rust/issues/29)) ([f03f977](https://github.com/godaddy/ans-sdk-rust/commit/f03f977fe78d00fe38ad564ec0b7014935d0162b))
+
 ## [0.1.2](https://github.com/godaddy/ans-sdk-rust/compare/ans-types-v0.1.1...ans-types-v0.1.2) (2026-03-05)
 
 
