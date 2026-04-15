@@ -17,6 +17,12 @@
         { "type": "ci", "section": "Continuous Integration", "hidden": true }
   ],
   "packages": {
+    ".": {
+      "release-type": "simple",
+      "component": "ans-sdk",
+      "skip-github-release": true,
+      "exclude-paths": ["crates/ans-types", "crates/ans-verify", "crates/ans-client"]
+    },
     "crates/ans-types": {
       "release-type": "rust",
       "component": "ans-types",
@@ -63,7 +69,7 @@
     {
       "type": "linked-versions",
       "groupName": "ans-sdk",
-      "components": ["ans-types", "ans-verify", "ans-client"]
+      "components": ["ans-types", "ans-verify", "ans-client", "ans-sdk"]
     }
   ]
 }
