@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/godaddy/ans-sdk-rust/compare/ans-verify-v0.1.3...ans-verify-v0.1.4) (2026-04-15)
+
+
+### Miscellaneous
+
+* **ans-verify:** Synchronize ans-sdk versions
+
 ## [0.1.3](https://github.com/godaddy/ans-sdk-rust/compare/ans-verify-v0.1.2...ans-verify-v0.1.3) (2026-04-14)
 
 
