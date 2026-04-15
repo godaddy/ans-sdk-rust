@@ -21,7 +21,7 @@ ans-verify = { path = "crates/ans-verify", version = "0.1.4" }
 ans-client = { path = "crates/ans-client", version = "0.1.4" }
 
 # Async runtime
-tokio = { version = "1.50", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -39,7 +39,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 hickory-resolver = { version = "0.25", features = ["tls-ring", "dnssec-ring", "system-config"] }
 
 # Cryptography
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 subtle = "2.6"
 rcgen = { version = "0.14", features = ["pem"] }
