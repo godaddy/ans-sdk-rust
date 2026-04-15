@@ -19,20 +19,51 @@
   "packages": {
     "crates/ans-types": {
       "release-type": "rust",
-      "component": "ans-types"
+      "component": "ans-types",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "../../Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "../../Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.ans-types.version"
+        }
+      ]
     },
     "crates/ans-verify": {
       "release-type": "rust",
-      "component": "ans-verify"
+      "component": "ans-verify",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "../../Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.ans-verify.version"
+        }
+      ]
     },
     "crates/ans-client": {
       "release-type": "rust",
-      "component": "ans-client"
+      "component": "ans-client",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "../../Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.ans-client.version"
+        }
+      ]
     }
   },
   "plugins": [
     {
       "type": "cargo-workspace"
+    },
+    {
+      "type": "linked-versions",
+      "groupName": "ans-sdk",
+      "components": ["ans-types", "ans-verify", "ans-client"]
     }
   ]
 }
