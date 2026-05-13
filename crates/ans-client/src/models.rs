@@ -594,6 +594,14 @@ pub enum RevocationReason {
     PrivilegeWithdrawn,
     /// AA compromised.
     AaCompromise,
+    /// CA compromised.
+    CaCompromise,
+    /// Certificate has expired.
+    ExpiredCert,
+    /// Remove from certificate revocation list.
+    RemoveFromCrl,
+    /// Reason unspecified.
+    Unspecified,
 }
 
 /// Request to revoke an agent.
